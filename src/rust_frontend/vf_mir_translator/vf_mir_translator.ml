@@ -484,9 +484,37 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
     let annot : Mir.annot = { span; raw } in
     Ok annot
 
+  (* In a function of an inherent impl block, the name that stands for Self in
+     ghost code, applied to the impl's generic parameters. *)
+  let self_type_alias : string option ref = ref None
+
+  (* Replaces each occurrence of the identifier Self in [raw] with [alias]. *)
+  let replace_self_ident alias raw =
+    let is_ident_char c =
+      match c with 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> true | _ -> false
+    in
+    let n = String.length raw in
+    let buf = Buffer.create n in
+    let rec iter i =
+      if i >= n then ()
+      else if i + 4 <= n && String.sub raw i 4 = "Self"
+              && (i = 0 || not (is_ident_char raw.[i - 1]))
+              && (i + 4 = n || not (is_ident_char raw.[i + 4])) then begin
+        Buffer.add_string buf alias;
+        iter (i + 4)
+      end else begin
+        Buffer.add_char buf raw.[i];
+        iter (i + 1)
+      end
+    in
+    iter 0;
+    Buffer.contents buf
+
   let translate_annot_to_vf_parser_inp ({ span; raw } : Mir.annot) =
     let spos, epos = Ast.lexed_loc span in
-    (spos, raw)
+    match !self_type_alias with
+    | None -> (spos, raw)
+    | Some alias -> (spos, replace_self_ident alias raw)
 
   let translate_contract (contract_cpn : ContractRd.t) =
     let open ContractRd in
@@ -1456,6 +1484,140 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
         "std::mem::ManuallyDrop::deref_mut"
     | _ -> name
 
+  (* Dispatch concrete atomic operations to the matching primitive contract.
+     The pinned compiler exports AtomicOrdering as the enum variant index. *)
+  and specialize_atomic_access (fn_ty : D.ty_kind_fn_def_ty) loc =
+    match fn_ty.id.name with
+    | ("core::intrinsics::atomic_store" | "std::intrinsics::atomic_store" |
+       "core::intrinsics::atomic_load" | "std::intrinsics::atomic_load" |
+       "core::intrinsics::atomic_xchg" | "std::intrinsics::atomic_xchg" |
+       "core::intrinsics::atomic_max" | "std::intrinsics::atomic_max" |
+       "core::intrinsics::atomic_min" | "std::intrinsics::atomic_min" |
+       "core::intrinsics::atomic_umax" | "std::intrinsics::atomic_umax" |
+       "core::intrinsics::atomic_umin" | "std::intrinsics::atomic_umin") as name ->
+        let operation = List.hd (List.rev (String.split_on_char ':' name)) in
+        let extremum = List.mem operation ["atomic_min"; "atomic_max"; "atomic_umin"; "atomic_umax"] in
+        let has_volatile_arg = operation = "atomic_store" || operation = "atomic_load" in
+        let reject reason = Ast.static_error loc (operation ^ ": " ^ reason) None in
+        let shape_error () =
+          let operand_order = "expected a concrete integer or thin pointer, a concrete AtomicOrdering" in
+          reject (if extremum then "expected a concrete integer and a concrete AtomicOrdering"
+                  else if operation = "atomic_xchg" then "expected a concrete integer or thin pointer and a concrete AtomicOrdering"
+                  else operand_order ^ ", and VOLATILE=false")
+        in
+        (match fn_ty.substs with
+        | ({kind = Type {kind = operand_type}} as operand) ::
+          {kind = Const {kind = Value {
+             ty = {kind = Adt {
+               id = {name = ("core::intrinsics::AtomicOrdering" |
+                             "std::intrinsics::AtomicOrdering")};
+               kind = EnumKind; substs = [];
+             }};
+             val_tree = Branch [{kind = Value {ty = {kind = UInt U32};
+               val_tree = Leaf {data = order; size = 4}}}];
+           }}} :: rest when fn_ty.late_bound_generic_param_count = 0 ->
+            (match operation, operand_type with
+            (* A generic operand is verified once for all instantiations, since
+               the primitive contract is parametric in T. Rustc rejects
+               non-integer, non-pointer instantiations during monomorphization.
+               The concrete cases above check the instantiations used by
+               core::sync::atomic, including the thin-pointer restriction. *)
+            | _, Param _ -> ()
+            | ("atomic_max" | "atomic_min"), Int _ -> ()
+            | ("atomic_umax" | "atomic_umin"), UInt _ -> ()
+            | _, _ when extremum -> reject "expected an integer operand matching the comparison signedness"
+            | _, (Int _ | UInt _ | RawPtr {is_thin = true; _}) -> ()
+            | _ -> shape_error ());
+            (match rest with
+            | [] when not has_volatile_arg -> ()
+            | [{kind = Const {kind = Value {
+                 ty = {kind = Bool};
+                 val_tree = Leaf {data = volatile; size = 1};
+               }}}] when has_volatile_arg ->
+                if Stdint.Uint128.to_string (DecoderAux.uint128_get volatile) <> "0" then
+                  reject "only ordinary accesses (VOLATILE=false) are modeled"
+            (* A generic VOLATILE flag gets the ordinary-access contract. It is
+               at least as strong as the requirements of a volatile access. *)
+            | [{kind = Const {kind = Param _}}] when has_volatile_arg -> ()
+            | _ -> shape_error ());
+            let suffix =
+              match Stdint.Uint128.to_string (DecoderAux.uint128_get order) with
+              | "0" -> "relaxed"
+              | "1" when operation <> "atomic_load" -> "release"
+              | "2" when operation <> "atomic_store" -> "acquire"
+              | "3" when not has_volatile_arg -> "acqrel"
+              | "4" -> "seqcst"
+              | _ -> reject "unsupported ordering for an ordinary access"
+            in
+            let contract = if extremum then "safety" else suffix in
+            Some ("std::intrinsics::" ^ operation ^ "_" ^ contract, [operand])
+        | _ -> shape_error ())
+    | ("core::intrinsics::atomic_cxchg" | "std::intrinsics::atomic_cxchg" |
+       "core::intrinsics::atomic_cxchgweak" | "std::intrinsics::atomic_cxchgweak") as name ->
+        let operation = if Filename.check_suffix name "atomic_cxchgweak" then "atomic_cxchgweak" else "atomic_cxchg" in
+        let reject reason = Ast.static_error loc (operation ^ ": " ^ reason) None in
+        let decode_order (arg : D.generic_arg) =
+          match arg.kind with
+          | Const {kind = Value {
+              ty = {kind = Adt {
+                id = {name = ("core::intrinsics::AtomicOrdering" |
+                              "std::intrinsics::AtomicOrdering")};
+                kind = EnumKind; substs = [];
+              }};
+              val_tree = Branch [{kind = Value {ty = {kind = UInt U32};
+                val_tree = Leaf {data = order; size = 4}}}];
+            }} -> Stdint.Uint128.to_string (DecoderAux.uint128_get order)
+          | _ -> reject "expected a concrete AtomicOrdering"
+        in
+        (match fn_ty.substs with
+        | [({kind = Type {kind = (Int _ | UInt _ | RawPtr {is_thin = true; _} | Param _)}} as operand);
+           success; failure] when fn_ty.late_bound_generic_param_count = 0 ->
+            (match decode_order success, decode_order failure with
+            | ("0" | "1" | "2" | "3" | "4"), ("0" | "2" | "4") ->
+                (* Ordering variants share the storage-safety contract. *)
+                Some ("std::intrinsics::" ^ operation ^ "_safety", [operand])
+            | _ -> reject "unsupported success or failure ordering")
+        | _ -> reject "expected a concrete integer or thin pointer and two orderings")
+    | ("core::intrinsics::atomic_xadd" | "std::intrinsics::atomic_xadd" |
+       "core::intrinsics::atomic_xsub" | "std::intrinsics::atomic_xsub" |
+       "core::intrinsics::atomic_and" | "std::intrinsics::atomic_and" |
+       "core::intrinsics::atomic_nand" | "std::intrinsics::atomic_nand" |
+       "core::intrinsics::atomic_or" | "std::intrinsics::atomic_or" |
+       "core::intrinsics::atomic_xor" | "std::intrinsics::atomic_xor") as name ->
+        let operation = List.hd (List.rev (String.split_on_char ':' name)) in
+        let reject reason = Ast.static_error loc (operation ^ ": " ^ reason) None in
+        (match fn_ty.substs with
+        | [({kind = Type {kind = slot_ty}} as slot);
+           ({kind = Type {kind = delta_ty}} as delta);
+           {kind = Const {kind = Value {
+              ty = {kind = Adt {
+                id = {name = ("core::intrinsics::AtomicOrdering" |
+                              "std::intrinsics::AtomicOrdering")};
+                kind = EnumKind; substs = [];
+              }};
+              val_tree = Branch [{kind = Value {ty = {kind = UInt U32};
+                val_tree = Leaf {data = order; size = 4}}}];
+            }}}] when fn_ty.late_bound_generic_param_count = 0 ->
+            (match slot_ty, delta_ty with
+            | Int slot, Int delta when slot = delta -> ()
+            | UInt slot, UInt delta when slot = delta -> ()
+            | RawPtr {is_thin = true; _}, UInt USize when operation <> "atomic_nand" -> ()
+            | Param _, Param _ -> ()
+            | _ -> reject "expected matching integer operands or a concrete thin pointer with a usize delta");
+            (match Stdint.Uint128.to_string (DecoderAux.uint128_get order) with
+            | "0" | "1" | "2" | "3" | "4" ->
+                (* Each ordering uses the same storage-safety contract. *)
+                let contract, operands =
+                  match operation, slot_ty with
+                  | ("atomic_and" | "atomic_or" | "atomic_xor"), UInt U8 ->
+                      "_byte_safety", []
+                  | _ -> "_safety", [slot; delta]
+                in
+                Some ("std::intrinsics::" ^ operation ^ contract, operands)
+            | _ -> reject "unsupported arithmetic ordering")
+        | _ -> reject "expected two concrete operand types and a concrete AtomicOrdering")
+    | _ -> None
+
   and translate_fn_def_ty (fn_def_ty_cpn : D.ty_kind_fn_def_ty) (loc : Ast.loc)
       =
     let id_cpn = fn_def_ty_cpn.id in
@@ -2386,17 +2548,17 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
       | `TrOperandMove (Var (_, fn_name), place_is_mutable) ->
           translate_regular_fn_call [] fn_name
       | `TrTypedConstantFn fn_def_ty_cpn -> (
-          let fn_name = fn_def_ty_cpn.id.name in
-          let substs_cpn = fn_def_ty_cpn.substs in
-          let fn_name = translate_fn_name fn_name substs_cpn in
-          let substs_cpn =
-            substs_cpn
-            @ List.init fn_def_ty_cpn.late_bound_generic_param_count
-                (fun i : D.generic_arg ->
-                  { kind = Lifetime { id = "'erased" } })
-          in
           let fn_name, substs_cpn =
-            Args.body_tr_defs_ctx.fn_specializer fn_name substs_cpn
+            match specialize_atomic_access fn_def_ty_cpn call_loc with
+            | Some specialization -> specialization
+            | None ->
+                let substs = fn_def_ty_cpn.substs in
+                let fn_name = translate_fn_name fn_def_ty_cpn.id.name substs in
+                let substs =
+                  substs @ List.init fn_def_ty_cpn.late_bound_generic_param_count
+                    (fun _ : D.generic_arg -> {kind = Lifetime {id = "'erased"}})
+                in
+                Args.body_tr_defs_ctx.fn_specializer fn_name substs
           in
           let* substs =
             ListAux.try_map
@@ -4801,7 +4963,31 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
                     (TraitRd.RequiredFn.contract_get required_fn_cpn)))
       else required_fns
     in
-    ListAux.try_map (translate_trait_required_fn adt_defs name) required_fns
+    let* required_fn_decls =
+      ListAux.try_map (translate_trait_required_fn adt_defs name) required_fns
+    in
+    (* <T as Trait>::Assoc has typeid Trait::Assoc_typeid<T>(), as for traits
+       declared in .rsspec files. *)
+    let assoc_typeid_decls =
+      TraitRd.sized_assoc_types_get_list trait_cpn
+      |> List.map (fun assoc_type ->
+             let loc = Ast.dummy_loc in
+             Ast.Func
+               ( loc,
+                 Ast.Fixpoint,
+                 Ast.unbounded_tparams [ "Self" ],
+                 Some (Ast.PtrTypeExpr (loc, Ast.ManifestTypeExpr (loc, Ast.Void))),
+                 Printf.sprintf "%s::%s_typeid" name assoc_type,
+                 [],
+                 false,
+                 (None, None),
+                 None,
+                 false,
+                 None,
+                 false,
+                 [] ))
+    in
+    Ok (assoc_typeid_decls @ required_fn_decls)
 
   let decode_clause (clause_cpn : D.clause) =
     match clause_cpn with
@@ -6267,6 +6453,28 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
             let [ variant_def_no_zst ] = variants_no_zst in
             let fds_no_zst = variant_def_no_zst.fields in
             let field_defs_no_zst = List.map translate_to_vf_field_def fds_no_zst in
+            (* Alignments of instances such as Atomic<i16>, computed by rustc. *)
+            (* An instance whose type arguments VeriFast cannot represent, such as
+               Box<str>, gets no fact. *)
+            let instance_alignments =
+              instance_alignments_get_list adt_def_cpn
+              |> List.filter_map @@ fun instance_cpn ->
+                 let open AdtDefRd.InstanceAlignment in
+                 let alignment = alignment_get instance_cpn in
+                 if alignment = Stdint.Uint64.zero || alignment > Stdint.Uint64.of_int (1 lsl 29) then
+                   Ast.static_error def_loc "Invalid compiler-exported instance alignment" None;
+                 let translate arg_cpn =
+                   match translate_generic_arg (D.decode_generic_arg arg_cpn) def_loc with
+                   | Ok (Mir.GenArgType ty_info) -> Some ty_info.vf_ty
+                   | _ -> None
+                   | exception Ast.StaticError _ -> None
+                 in
+                 let targs = List.map translate (generic_args_get_list instance_cpn) in
+                 if List.mem None targs then None
+                 else
+                   Some (Ast.RustcInstanceAlignment (type_params_get_list instance_cpn,
+                     List.map Option.get targs, Stdint.Uint64.to_int alignment))
+            in
             let struct_decl =
               Ast.Struct
                 ( def_loc,
@@ -6278,7 +6486,17 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
                       (*instance_pred_decl list*) [],
                       (*is polymorphic*) false ),
                   (*struct_attr list*)
-                  if is_repr_c_get adt_def_cpn then [ ReprC ] else [] )
+                  let repr = if is_repr_c_get adt_def_cpn then [ Ast.ReprC ] else [] in
+                  let alignment = known_alignment_get adt_def_cpn in
+                  let attrs =
+                    if alignment = Stdint.Uint64.zero then repr
+                    else begin
+                      if vf_tparams <> [] || alignment > Stdint.Uint64.of_int (1 lsl 29) then
+                        Ast.static_error def_loc "Invalid compiler-exported concrete ABI alignment" None;
+                      Ast.RustcAbiAlignment (Stdint.Uint64.to_int alignment) :: repr
+                    end
+                  in
+                  attrs @ instance_alignments )
             in
             let struct_typedef_aux =
               Ast.TypedefDecl
@@ -7636,8 +7854,8 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
     | UInt uintTy1, UInt uintTy2 -> if uintTy1 = uintTy2 then Some env else None
     | Adt { id = id1; substs = substs1 }, Adt { id = id2; substs = substs2 } ->
         if canonicalize_item_name id1.name = canonicalize_item_name id2.name then match_gen_arg_lists env substs1 substs2 else None
-    | ( RawPtr { ty = ty1; mutability = mut1 },
-        RawPtr { ty = ty2; mutability = mut2 } ) ->
+    | ( RawPtr { ty = ty1; mutability = mut1; _ },
+        RawPtr { ty = ty2; mutability = mut2; _ } ) ->
         if mut1 = mut2 then match_types env ty1 ty2 else None
     | _ -> None
 
@@ -8109,12 +8327,37 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
       let body_tr_defs_ctx =
         { adt_defs; directives = vf_mir_translator_directives; fn_specializer }
       in
+      (* Ghost code in an inherent impl refers to the impl's self type as Self. Each
+         such function gets a type alias for it, generic over the impl's parameters. *)
+      let self_alias_decls = ref [] in
       let* bodies_tr_res =
         Rocq_writer.rocq_print Args.rocq_writer "Definition bodies := ";
         Rocq_writer.rocq_print_big_list Args.rocq_writer @@ fun () ->
-        bodies_cpn |> ListAux.try_map @@ fun body_cpn ->
+        bodies_cpn |> List.mapi (fun i body_cpn -> (i, body_cpn)) |> ListAux.try_map @@ fun (i, body_cpn) ->
           Rocq_writer.rocq_print_big_list_element Args.rocq_writer @@ fun () ->
-          translate_body body_tr_defs_ctx body_cpn
+          let* () =
+            if BodyRd.is_inherent_impl_fn_get body_cpn then begin
+              let* loc = translate_span_data (BodyRd.fn_sig_span_get body_cpn) in
+              let* self_ty = translate_ty (BodyRd.inherent_impl_self_ty_get body_cpn) loc in
+              let impl_params =
+                BodyRd.impl_block_generics_get_list body_cpn
+                |> List.map translate_generic_param_def |> List.map fst
+              in
+              let alias = Printf.sprintf "Self__%d" i in
+              let module_path = BodyRd.module_def_path_get body_cpn in
+              let full_name = if module_path = "" then alias else module_path ^ "::" ^ alias in
+              self_alias_decls := Ast.TypedefDecl (loc, self_ty.vf_ty, full_name, impl_params) :: !self_alias_decls;
+              self_type_alias :=
+                Some (if impl_params = [] then alias else alias ^ "<" ^ String.concat ", " impl_params ^ ">");
+              Ok ()
+            end else begin
+              self_type_alias := None;
+              Ok ()
+            end
+          in
+          let result = translate_body body_tr_defs_ctx body_cpn in
+          self_type_alias := None;
+          result
       in
       Rocq_writer.rocq_print Args.rocq_writer ".\n";
       let body_sig_opts, body_decls, debug_infos =
@@ -8138,7 +8381,7 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
       let decls =
         List.map
           (modularize_decl module_imports_map)
-          (ty_alias_decls @ traits_decls @ trait_impl_prototypes @ adt_decls @ aux_decls
+          (ty_alias_decls @ !self_alias_decls @ traits_decls @ trait_impl_prototypes @ adt_decls @ aux_decls
          @ adts_full_bor_content_preds @ adts_proof_obligs)
         @ ghost_decls
         @ List.map

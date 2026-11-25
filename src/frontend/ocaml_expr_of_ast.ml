@@ -1170,6 +1170,8 @@ and of_ctor = function
 and of_struct_attr = function
   Packed -> c "Packed"
 | ReprC -> c "ReprC"
+| RustcAbiAlignment n -> C ("RustcAbiAlignment", [I n])
+| RustcInstanceAlignment (xs, targs, n) -> C ("RustcInstanceAlignment", [of_list (fun x -> S x) xs; of_list of_type_expr targs; I n])
 and of_constant_value = function
   IntConst n -> C ("IntConst", [BigInt n])
 | BoolConst b -> C ("BoolConst", [B b])

@@ -1119,7 +1119,8 @@ and
 and
   struct_attr =
   | Packed
-  | ReprC
+  | ReprC | RustcAbiAlignment of int
+  | RustcInstanceAlignment of string list (* quantified type parameters *) * type_expr list (* struct type arguments *) * int
 and constant_value = (* ?constant_value *)
   IntConst of big_int
 | BoolConst of bool

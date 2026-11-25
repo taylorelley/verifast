@@ -786,6 +786,36 @@ use rustc_span::RemapPathScopeComponents;
                 let mut trait_cpn = traits_cons_cpn.reborrow().init_h();
                 let name = self.tcx.def_path_str(trait_def_id);
                 trait_cpn.set_name(&name);
+                // VeriFast names the typeid of <T as Trait>::Assoc after the trait and the
+                // associated type. Export those that are known to be Sized.
+                let sized_trait = self.tcx.lang_items().sized_trait();
+                let sized_assoc_types: Vec<String> =
+                    if self.tcx.generics_of(trait_def_id).count() != 1 {
+                        Vec::new()
+                    } else {
+                        self.tcx
+                            .associated_items(trait_def_id)
+                            .in_definition_order()
+                            .filter(|item| {
+                                item.kind.as_def_kind() == rustc_hir::def::DefKind::AssocTy
+                                    && self.tcx.generics_of(item.def_id).own_params.is_empty()
+                                    && self.tcx.item_bounds(item.def_id).skip_binder().iter().any(
+                                        |clause| match clause.as_trait_clause() {
+                                            Some(trait_clause) => {
+                                                Some(trait_clause.def_id()) == sized_trait
+                                            }
+                                            None => false,
+                                        },
+                                    )
+                            })
+                            .map(|item| item.name().to_string())
+                            .collect()
+                    };
+                let mut sized_assoc_types_cpn =
+                    trait_cpn.reborrow().init_sized_assoc_types(sized_assoc_types.len());
+                for (i, assoc_type) in sized_assoc_types.iter().enumerate() {
+                    sized_assoc_types_cpn.set(i, assoc_type);
+                }
                 let mut required_fns_cpn = trait_cpn.reborrow().init_required_fns();
                 for item in self
                     .tcx
@@ -930,6 +960,7 @@ use rustc_span::RemapPathScopeComponents;
             // Encode traits (consumes annotations)
             self.encode_traits(&mut req_adt_defs, vf_mir_cpn.reborrow());
 
+            let mut expansion_spans = Vec::new();
             vf_mir_cpn.fill_bodies(&self.bodies, |mut body_cpn, (body, span)| {
                 Self::encode_span_data(
                     self.tcx,
@@ -937,17 +968,24 @@ use rustc_span::RemapPathScopeComponents;
                     body_cpn.reborrow().init_fn_sig_span(),
                 );
                 let body_span = body.span.data();
-                let mut annots = self
-                    .annots
-                    .extract_if(|annot| {
-                        body_span.contains(
-                            annot
-                                .span()
-                                .expect("Dummy annot found during serialization")
-                                .data(),
-                        )
-                    })
-                    .collect::<LinkedList<_>>();
+                let in_body = |annot: &Box<GhostRange>| {
+                    body_span.contains(
+                        annot
+                            .span()
+                            .expect("Dummy annot found during serialization")
+                            .data(),
+                    )
+                };
+                // All expansions of a macro share the annotations written in the macro
+                // body, so each such body gets its own copy. They are removed once all
+                // bodies are encoded.
+                let mut annots = if body.span.from_expansion() {
+                    let shared = self.annots.iter().filter(|annot| in_body(annot)).cloned().collect::<LinkedList<_>>();
+                    expansion_spans.push(body_span);
+                    shared
+                } else {
+                    self.annots.extract_if(|annot| in_body(annot)).collect::<LinkedList<_>>()
+                };
                 let mut_annots = annots.extract_if(|annot| {
                     annot.kind == GhostRangeKind::Mut
                 }).map(|annot| {
@@ -958,6 +996,12 @@ use rustc_span::RemapPathScopeComponents;
                 Self::encode_body(&mut enc_ctx, body_cpn);
                 req_adt_defs.extend(enc_ctx.get_req_adts());
             });
+            for span in expansion_spans {
+                let _ = self
+                    .annots
+                    .extract_if(|annot| span.contains(annot.span().expect("Dummy annot").data()))
+                    .count();
+            }
 
             // Encode directives
             vf_mir_cpn.fill_directives(&self.directives, |directive_cpn, directive| {
@@ -1098,6 +1142,74 @@ use rustc_span::RemapPathScopeComponents;
             });
             adt_def_cpn.set_implements_drop(adt_def.has_dtor(tcx));
             adt_def_cpn.set_is_repr_c(adt_def.repr().c());
+            if is_local && adt_def.is_struct() && tcx.generics_of(adt_def.did()).count() == 0 {
+                let adt_ty = tcx.type_of(adt_def.did()).instantiate_identity().skip_normalization();
+                let env = ty::TypingEnv::fully_monomorphized();
+                if let Ok(layout) = tcx.layout_of(env.as_query_input(adt_ty)) {
+                    adt_def_cpn.set_known_alignment(layout.align.abi.bytes());
+                }
+            }
+            if is_local && adt_def.is_struct() {
+                let instances = Self::instance_alignments(tcx, adt_def.did());
+                let mut instances_cpn =
+                    adt_def_cpn.reborrow().init_instance_alignments(instances.len());
+                for (i, (args, type_params, alignment)) in instances.into_iter().enumerate() {
+                    let mut instance_cpn = instances_cpn.reborrow().get(i);
+                    instance_cpn.fill_generic_args(args.iter(), |arg_cpn, arg| {
+                        Self::encode_gen_arg(tcx, enc_ctx, arg, arg_cpn);
+                    });
+                    instance_cpn.fill_type_params(type_params.iter().map(|x| x.as_str()));
+                    instance_cpn.set_alignment(alignment);
+                }
+            }
+        }
+
+        /// Collects the instances of a local struct that occur in the signatures of local
+        /// functions, with the ABI alignment rustc computes for each in the function's
+        /// typing environment. An instance is skipped if its layout depends on the
+        /// function's generic parameters, if it has lifetime or const arguments, or if
+        /// its arguments mention projections, which may have no VeriFast typeid.
+        fn instance_alignments(
+            tcx: TyCtxt<'tcx>,
+            adt_did: rustc_span::def_id::DefId,
+        ) -> Vec<(ty::GenericArgsRef<'tcx>, Vec<String>, u64)> {
+            use rustc_middle::ty::TypeVisitableExt;
+            let mut instances: Vec<(ty::GenericArgsRef<'tcx>, Vec<String>, u64)> = Vec::new();
+            for fn_did in tcx.hir_body_owners() {
+                let fn_did = fn_did.to_def_id();
+                if !matches!(tcx.def_kind(fn_did), hir::def::DefKind::Fn | hir::def::DefKind::AssocFn) {
+                    continue;
+                }
+                let sig = tcx.fn_sig(fn_did).instantiate_identity().skip_normalization().skip_binder();
+                let env = ty::TypingEnv::post_analysis(tcx, fn_did);
+                for sig_ty in sig.inputs_and_output.iter() {
+                    for arg in sig_ty.walk() {
+                        let Some(ty) = arg.as_type() else { continue };
+                        let ty::Adt(def, args) = ty.kind() else { continue };
+                        if def.did() != adt_did || ty.has_free_regions() || ty.has_escaping_bound_vars()
+                            || ty.has_aliases()
+                            || args.iter().any(|a| a.as_type().is_none())
+                            || instances.iter().any(|(a, _, _)| *a == *args)
+                        {
+                            continue;
+                        }
+                        let Ok(layout) = tcx.layout_of(env.as_query_input(ty)) else { continue };
+                        let mut type_params: Vec<String> = Vec::new();
+                        for inner in ty.walk() {
+                            if let Some(inner_ty) = inner.as_type() {
+                                if let ty::Param(param) = inner_ty.kind() {
+                                    let name = param.name.to_string();
+                                    if !type_params.contains(&name) {
+                                        type_params.push(name);
+                                    }
+                                }
+                            }
+                        }
+                        instances.push((args, type_params, layout.align.abi.bytes()));
+                    }
+                }
+            }
+            instances
         }
 
         fn encode_adt_kind(adt_kind: ty::AdtKind, mut adt_kind_cpn: adt_kind_cpn::Builder<'_>) {
@@ -1224,6 +1336,11 @@ use rustc_span::RemapPathScopeComponents;
                             Self::encode_typesystem_constant(enc_ctx.tcx, enc_ctx, &const_, term_cpn.init_const()),
                     }
                 }
+                ty::ClauseKind::ConstArgHasType(const_, ty) => {
+                    let mut const_arg_cpn = clause_cpn.init_const_arg_has_type();
+                    Self::encode_typesystem_constant(enc_ctx.tcx, enc_ctx, &const_, const_arg_cpn.reborrow().init_const());
+                    Self::encode_ty(enc_ctx.tcx, enc_ctx, ty, const_arg_cpn.init_ty());
+                }
                 _ => clause_cpn.set_ignored(()),
             }
         }
@@ -1325,6 +1442,12 @@ use rustc_span::RemapPathScopeComponents;
                         Self::encode_generic_param_def(generic_param, generic_param_cpn);
                     },
                 );
+                // Lets ghost code in inherent impls refer to the impl's self type as Self.
+                if tcx.impl_opt_trait_id(impl_did).is_none() {
+                    body_cpn.set_is_inherent_impl_fn(true);
+                    let self_ty = tcx.type_of(impl_did).instantiate_identity().skip_normalization();
+                    Self::encode_ty(tcx, enc_ctx, self_ty, body_cpn.reborrow().init_inherent_impl_self_ty());
+                }
 
                 let impl_clauses = tcx.clauses_of(impl_did).clauses;
                 body_cpn.fill_impl_block_clauses(impl_clauses, |clause_cpn, clause| {
@@ -1826,9 +1949,27 @@ use rustc_span::RemapPathScopeComponents;
                     Self::encode_ty_adt(tcx, enc_ctx, *adt_def, substs, adt_ty_cpn);
                 }
                 ty::TyKind::Foreign(_) => ty_kind_cpn.set_foreign(()),
-                ty::TyKind::RawPtr(ty, mutability) => {
-                    let raw_ptr_ty_cpn = ty_kind_cpn.init_raw_ptr();
-                    Self::encode_ty_raw_ptr(tcx, enc_ctx, *ty, *mutability, raw_ptr_ty_cpn);
+                ty::TyKind::RawPtr(pointee, mutability) => {
+                    use rustc_middle::ty::TypeVisitableExt;
+                    let mut raw_ptr_ty_cpn = ty_kind_cpn.init_raw_ptr();
+                    // A pointer to a generic pointee is thin if rustc can lay it out in the
+                    // enclosing function's typing environment, e.g. *mut T with T: Sized.
+                    let env = if !ty.has_param() {
+                        Some(ty::TypingEnv::fully_monomorphized())
+                    } else if let EncKind::Body(body) = enc_ctx.mode {
+                        Some(ty::TypingEnv::post_analysis(tcx, body.source.def_id()))
+                    } else {
+                        None
+                    };
+                    if let (Some(env), false, false) = (env, ty.has_aliases(), ty.has_escaping_bound_vars()) {
+                        if let Ok(layout) = tcx.layout_of(env.as_query_input(ty)) {
+                            raw_ptr_ty_cpn.set_is_thin(
+                                matches!(layout.backend_repr, rustc_abi::BackendRepr::Scalar(_))
+                                    && layout.size == tcx.data_layout.pointer_size(),
+                            );
+                        }
+                    }
+                    Self::encode_ty_raw_ptr(tcx, enc_ctx, *pointee, *mutability, raw_ptr_ty_cpn);
                 }
                 ty::TyKind::Ref(region, ty, mutability) => {
                     let ref_ty_cpn = ty_kind_cpn.init_ref();

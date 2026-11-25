@@ -279,6 +279,17 @@ struct AdtDef {
     clauses @7: List(Clause);
     implementsDrop @8: Bool;
     isReprC @11: Bool;
+    knownAlignment @12: UInt64; # Zero if unavailable or generic.
+    struct InstanceAlignment {
+        # The ABI alignment that rustc computes for this ADT applied to genericArgs,
+        # in the typing environment of a local function whose signature mentions
+        # the instance. typeParams lists the function's type parameters occurring
+        # in genericArgs; the layout was computed without knowing them.
+        genericArgs @0: List(GenericArg);
+        typeParams @1: List(Text);
+        alignment @2: UInt64;
+    }
+    instanceAlignments @13: List(InstanceAlignment);
 }
 
 enum AliasTyKind {
@@ -312,6 +323,7 @@ struct TyKind {
     struct RawPtrTy {
         ty @0: Ty;
         mutability @1: Mutability;
+        isThin @2: Bool; # Concrete pointer has a single scalar layout.
     }
 
     struct RefTy {
@@ -418,11 +430,16 @@ struct Clause {
         projectionTerm @0: AliasTerm;
         term @1: Term; # G
     }
+    struct ConstArgHasType { # const parameter C has type T
+        const @0: TyConst;
+        ty @1: Ty;
+    }
     union {
         outlives @0: Outlives;
         trait @2: Trait;
         projection @3: Projection;
         ignored @1: Void; # A clause that we are ignoring for now
+        constArgHasType @4: ConstArgHasType;
     }
 }
 
@@ -872,6 +889,8 @@ struct Body {
     isTraitFn @12: Bool;
     isDropFn @13: Bool; # Implements std::ops::Drop::drop
     visibility @22: Visibility;
+    isInherentImplFn @26: Bool; # Defined in an inherent impl block
+    inherentImplSelfTy @27: Ty; # The impl block's self type, if isInherentImplFn
 }
 
 struct Trait {
@@ -888,6 +907,9 @@ struct Trait {
 
     name @0: Text;
     requiredFns @1: IndList(RequiredFn);
+    # Associated types with a Sized bound and no generics of their own.
+    # Empty if the trait has generic parameters other than Self.
+    sizedAssocTypes @2: List(Text);
 }
 
 struct TyAlias {
