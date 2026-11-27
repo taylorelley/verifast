@@ -872,6 +872,8 @@ struct Body {
     isTraitFn @12: Bool;
     isDropFn @13: Bool; # Implements std::ops::Drop::drop
     visibility @22: Visibility;
+    isInherentImplFn @26: Bool; # Defined in an inherent impl block
+    inherentImplSelfTy @27: Ty; # The impl block's self type, if isInherentImplFn
 }
 
 struct Trait {
@@ -888,6 +890,9 @@ struct Trait {
 
     name @0: Text;
     requiredFns @1: IndList(RequiredFn);
+    # Associated types with a Sized bound and no generics of their own.
+    # Empty if the trait has generic parameters other than Self.
+    sizedAssocTypes @2: List(Text);
 }
 
 struct TyAlias {

@@ -786,6 +786,36 @@ use rustc_span::RemapPathScopeComponents;
                 let mut trait_cpn = traits_cons_cpn.reborrow().init_h();
                 let name = self.tcx.def_path_str(trait_def_id);
                 trait_cpn.set_name(&name);
+                // VeriFast names the typeid of <T as Trait>::Assoc after the trait and the
+                // associated type. Export those that are known to be Sized.
+                let sized_trait = self.tcx.lang_items().sized_trait();
+                let sized_assoc_types: Vec<String> =
+                    if self.tcx.generics_of(trait_def_id).count() != 1 {
+                        Vec::new()
+                    } else {
+                        self.tcx
+                            .associated_items(trait_def_id)
+                            .in_definition_order()
+                            .filter(|item| {
+                                item.kind.as_def_kind() == rustc_hir::def::DefKind::AssocTy
+                                    && self.tcx.generics_of(item.def_id).own_params.is_empty()
+                                    && self.tcx.item_bounds(item.def_id).skip_binder().iter().any(
+                                        |clause| match clause.as_trait_clause() {
+                                            Some(trait_clause) => {
+                                                Some(trait_clause.def_id()) == sized_trait
+                                            }
+                                            None => false,
+                                        },
+                                    )
+                            })
+                            .map(|item| item.name().to_string())
+                            .collect()
+                    };
+                let mut sized_assoc_types_cpn =
+                    trait_cpn.reborrow().init_sized_assoc_types(sized_assoc_types.len());
+                for (i, assoc_type) in sized_assoc_types.iter().enumerate() {
+                    sized_assoc_types_cpn.set(i, assoc_type);
+                }
                 let mut required_fns_cpn = trait_cpn.reborrow().init_required_fns();
                 for item in self
                     .tcx
@@ -1339,6 +1369,12 @@ use rustc_span::RemapPathScopeComponents;
                         Self::encode_generic_param_def(generic_param, generic_param_cpn);
                     },
                 );
+                // Lets ghost code in inherent impls refer to the impl's self type as Self.
+                if tcx.impl_opt_trait_id(impl_did).is_none() {
+                    body_cpn.set_is_inherent_impl_fn(true);
+                    let self_ty = tcx.type_of(impl_did).instantiate_identity().skip_normalization();
+                    Self::encode_ty(tcx, enc_ctx, self_ty, body_cpn.reborrow().init_inherent_impl_self_ty());
+                }
 
                 let impl_clauses = tcx.clauses_of(impl_did).clauses;
                 body_cpn.fill_impl_block_clauses(impl_clauses, |clause_cpn, clause| {

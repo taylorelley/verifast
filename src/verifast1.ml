@@ -2473,6 +2473,18 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
     in
     iter [] structmap0 [] (List.rev structdeclmap)
 
+  let sized_projection_typeids =
+    (ps |> flatmap @@ fun (PackageDecl (_, pn, _, ds)) ->
+      ds |> flatmap @@ function
+        Func (_, Fixpoint, _, _, g, [], _, _, _, _, None, _, _) ->
+          [if pn = "" then g else pn ^ "::" ^ g]
+      | _ -> []) @
+    (* Typeid functions of associated types of traits in imported .rsspec files. A
+       .rsspec trait cannot declare a ?Sized associated type, so each one is Sized,
+       which holds for FnOnce::Output, Iterator::Item and AtomicPrimitive::AtomicInner. *)
+    (purefuncmap0 |> flatmap @@ fun (g, (_, _, _, params, _)) ->
+      if params = [] && String.ends_with ~suffix:"_typeid" g then [g] else [])
+
   let struct_sizedness_map1 =
     let rec sizedness_of_type t: (bool, string) Either.t =
       match unfold_inferred_type t with
@@ -2491,7 +2503,14 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
       | BoundedGhostTypeParam (x, _) -> Right x
       | InferredType _ -> failwith "sizedness_of_type: called on unresolved inferred type"
       | ProjectionType (t, traitName, traitArgs, assocTypeName) ->
-        failwith "sizedness_of_type: TODO: projection types"
+        (* Only Sized associated types receive a typeid function: the Rust
+           frontend exports them from the trait's item bounds, and .rsspec
+           files cannot declare ?Sized associated types. Other projections
+           are still rejected. *)
+        if List.mem (traitName ^ "::" ^ assocTypeName ^ "_typeid") sized_projection_typeids then
+          Left true
+        else
+          failwith "sizedness_of_type: TODO: projection types"
     and get_struct_sizedness sn =
       match try_assoc sn struct_sizedness_map1 with
         Some (l, state_ref) -> finish_struct_sizedness_checking l sn state_ref
