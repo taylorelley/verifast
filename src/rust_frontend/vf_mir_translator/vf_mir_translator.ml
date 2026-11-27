@@ -1511,6 +1511,159 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
         "std::mem::ManuallyDrop::deref_mut"
     | _ -> name
 
+  (* Dispatch concrete atomic operations to the matching primitive contract.
+     The pinned compiler exports AtomicOrdering as the enum variant index. *)
+  and specialize_atomic_access small_relaxed_loads (fn_ty : D.ty_kind_fn_def_ty) loc =
+    match fn_ty.id.name with
+    | ("core::intrinsics::atomic_store" | "std::intrinsics::atomic_store" |
+       "core::intrinsics::atomic_load" | "std::intrinsics::atomic_load" |
+       "core::intrinsics::atomic_xchg" | "std::intrinsics::atomic_xchg" |
+       "core::intrinsics::atomic_max" | "std::intrinsics::atomic_max" |
+       "core::intrinsics::atomic_min" | "std::intrinsics::atomic_min" |
+       "core::intrinsics::atomic_umax" | "std::intrinsics::atomic_umax" |
+       "core::intrinsics::atomic_umin" | "std::intrinsics::atomic_umin") as name ->
+        let operation = List.hd (List.rev (String.split_on_char ':' name)) in
+        let extremum = List.mem operation ["atomic_min"; "atomic_max"; "atomic_umin"; "atomic_umax"] in
+        let has_volatile_arg = operation = "atomic_store" || operation = "atomic_load" in
+        let reject reason = Ast.static_error loc (operation ^ ": " ^ reason) None in
+        let shape_error () =
+          let operand_order = "expected a concrete integer or thin pointer, a concrete AtomicOrdering" in
+          reject (if extremum then "expected a concrete integer and a concrete AtomicOrdering"
+                  else if operation = "atomic_xchg" then "expected a concrete integer or thin pointer and a concrete AtomicOrdering"
+                  else operand_order ^ ", and VOLATILE=false")
+        in
+        (match fn_ty.substs with
+        | ({kind = Type {kind = operand_type}} as operand) ::
+          {kind = Const {kind = Value {
+             ty = {kind = Adt {
+               id = {name = ("core::intrinsics::AtomicOrdering" |
+                             "std::intrinsics::AtomicOrdering")};
+               kind = EnumKind; substs = [];
+             }};
+             val_tree = Branch [{kind = Value {ty = {kind = UInt U32};
+               val_tree = Leaf {data = order; size = 4}}}];
+           }}} :: rest when fn_ty.late_bound_generic_param_count = 0 ->
+            (match operation, operand_type with
+            (* A generic operand is verified once for all instantiations, since
+               the primitive contract is parametric in T. Rustc rejects
+               non-integer, non-pointer instantiations during monomorphization.
+               The concrete cases above check the instantiations used by
+               core::sync::atomic, including the thin-pointer restriction. *)
+            | _, Param _ -> ()
+            | ("atomic_max" | "atomic_min"), Int _ -> ()
+            | ("atomic_umax" | "atomic_umin"), UInt _ -> ()
+            | _, _ when extremum -> reject "expected an integer operand matching the comparison signedness"
+            | _, (Int _ | UInt _ | RawPtr {is_thin = true; _}) -> ()
+            | _ -> shape_error ());
+            (* [known_ordinary] holds when the access is known not to be volatile. *)
+            let known_ordinary =
+              match rest with
+              | [] when not has_volatile_arg -> true
+              | [{kind = Const {kind = Value {
+                   ty = {kind = Bool};
+                   val_tree = Leaf {data = volatile; size = 1};
+                 }}}] when has_volatile_arg ->
+                  if Stdint.Uint128.to_string (DecoderAux.uint128_get volatile) <> "0" then
+                    reject "only ordinary accesses (VOLATILE=false) are modeled";
+                  true
+              (* A generic VOLATILE flag gets the ordinary-access contract that
+                 requires writable storage. It is at least as strong as the
+                 requirements of a volatile access. *)
+              | [{kind = Const {kind = Param _}}] when has_volatile_arg -> false
+              | _ -> shape_error ()
+            in
+            let suffix =
+              match Stdint.Uint128.to_string (DecoderAux.uint128_get order) with
+              | "0" -> "relaxed"
+              | "1" when operation <> "atomic_load" -> "release"
+              | "2" when operation <> "atomic_store" -> "acquire"
+              | "3" when not has_volatile_arg -> "acqrel"
+              | "4" -> "seqcst"
+              | _ -> reject "unsupported ordering for an ordinary access"
+            in
+            (* Only a non-volatile Relaxed load of at most eight bytes on a
+               target where such loads work on read-only memory may use a
+               read fraction (see the core::sync::atomic module docs). *)
+            let contract =
+              if extremum then "safety"
+              else if operation = "atomic_load" && suffix = "relaxed"
+                      && small_relaxed_loads && known_ordinary
+                      && (match operand_type with
+                          | Int (I8 | I16 | I32 | I64 | ISize)
+                          | UInt (U8 | U16 | U32 | U64 | USize)
+                          | RawPtr {is_thin = true; _} -> true
+                          | _ -> false)
+              then "relaxed_up_to_eight_bytes"
+              else suffix
+            in
+            Some ("std::intrinsics::" ^ operation ^ "_" ^ contract, [operand])
+        | _ -> shape_error ())
+    | ("core::intrinsics::atomic_cxchg" | "std::intrinsics::atomic_cxchg" |
+       "core::intrinsics::atomic_cxchgweak" | "std::intrinsics::atomic_cxchgweak") as name ->
+        let operation = if Filename.check_suffix name "atomic_cxchgweak" then "atomic_cxchgweak" else "atomic_cxchg" in
+        let reject reason = Ast.static_error loc (operation ^ ": " ^ reason) None in
+        let decode_order (arg : D.generic_arg) =
+          match arg.kind with
+          | Const {kind = Value {
+              ty = {kind = Adt {
+                id = {name = ("core::intrinsics::AtomicOrdering" |
+                              "std::intrinsics::AtomicOrdering")};
+                kind = EnumKind; substs = [];
+              }};
+              val_tree = Branch [{kind = Value {ty = {kind = UInt U32};
+                val_tree = Leaf {data = order; size = 4}}}];
+            }} -> Stdint.Uint128.to_string (DecoderAux.uint128_get order)
+          | _ -> reject "expected a concrete AtomicOrdering"
+        in
+        (match fn_ty.substs with
+        | [({kind = Type {kind = (Int _ | UInt _ | RawPtr {is_thin = true; _} | Param _)}} as operand);
+           success; failure] when fn_ty.late_bound_generic_param_count = 0 ->
+            (match decode_order success, decode_order failure with
+            | ("0" | "1" | "2" | "3" | "4"), ("0" | "2" | "4") ->
+                (* Ordering variants share the storage-safety contract. *)
+                Some ("std::intrinsics::" ^ operation ^ "_safety", [operand])
+            | _ -> reject "unsupported success or failure ordering")
+        | _ -> reject "expected a concrete integer or thin pointer and two orderings")
+    | ("core::intrinsics::atomic_xadd" | "std::intrinsics::atomic_xadd" |
+       "core::intrinsics::atomic_xsub" | "std::intrinsics::atomic_xsub" |
+       "core::intrinsics::atomic_and" | "std::intrinsics::atomic_and" |
+       "core::intrinsics::atomic_nand" | "std::intrinsics::atomic_nand" |
+       "core::intrinsics::atomic_or" | "std::intrinsics::atomic_or" |
+       "core::intrinsics::atomic_xor" | "std::intrinsics::atomic_xor") as name ->
+        let operation = List.hd (List.rev (String.split_on_char ':' name)) in
+        let reject reason = Ast.static_error loc (operation ^ ": " ^ reason) None in
+        (match fn_ty.substs with
+        | [({kind = Type {kind = slot_ty}} as slot);
+           ({kind = Type {kind = delta_ty}} as delta);
+           {kind = Const {kind = Value {
+              ty = {kind = Adt {
+                id = {name = ("core::intrinsics::AtomicOrdering" |
+                              "std::intrinsics::AtomicOrdering")};
+                kind = EnumKind; substs = [];
+              }};
+              val_tree = Branch [{kind = Value {ty = {kind = UInt U32};
+                val_tree = Leaf {data = order; size = 4}}}];
+            }}}] when fn_ty.late_bound_generic_param_count = 0 ->
+            (match slot_ty, delta_ty with
+            | Int slot, Int delta when slot = delta -> ()
+            | UInt slot, UInt delta when slot = delta -> ()
+            | RawPtr {is_thin = true; _}, UInt USize when operation <> "atomic_nand" -> ()
+            | Param _, Param _ -> ()
+            | _ -> reject "expected matching integer operands or a concrete thin pointer with a usize delta");
+            (match Stdint.Uint128.to_string (DecoderAux.uint128_get order) with
+            | "0" | "1" | "2" | "3" | "4" ->
+                (* Each ordering uses the same storage-safety contract. *)
+                let contract, operands =
+                  match operation, slot_ty with
+                  | ("atomic_and" | "atomic_or" | "atomic_xor"), UInt U8 ->
+                      "_byte_safety", []
+                  | _ -> "_safety", [slot; delta]
+                in
+                Some ("std::intrinsics::" ^ operation ^ contract, operands)
+            | _ -> reject "unsupported arithmetic ordering")
+        | _ -> reject "expected two concrete operand types and a concrete AtomicOrdering")
+    | _ -> None
+
   and translate_fn_def_ty (fn_def_ty_cpn : D.ty_kind_fn_def_ty) (loc : Ast.loc)
       =
     let id_cpn = fn_def_ty_cpn.id in
@@ -1984,6 +2137,7 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
   type body_tr_defs_ctx = {
     adt_defs : Mir.adt_def_tr list;
     directives : Mir.annot list;
+    small_relaxed_loads : bool;
     fn_specializer : string -> D.generic_arg list -> string * D.generic_arg list;
   }
 
@@ -2441,17 +2595,17 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
       | `TrOperandMove (Var (_, fn_name), place_is_mutable) ->
           translate_regular_fn_call [] fn_name
       | `TrTypedConstantFn fn_def_ty_cpn -> (
-          let fn_name = fn_def_ty_cpn.id.name in
-          let substs_cpn = fn_def_ty_cpn.substs in
-          let fn_name = translate_fn_name fn_name substs_cpn in
-          let substs_cpn =
-            substs_cpn
-            @ List.init fn_def_ty_cpn.late_bound_generic_param_count
-                (fun i : D.generic_arg ->
-                  { kind = Lifetime { id = "'erased" } })
-          in
           let fn_name, substs_cpn =
-            Args.body_tr_defs_ctx.fn_specializer fn_name substs_cpn
+            match specialize_atomic_access Args.body_tr_defs_ctx.small_relaxed_loads fn_def_ty_cpn call_loc with
+            | Some specialization -> specialization
+            | None ->
+                let substs = fn_def_ty_cpn.substs in
+                let fn_name = translate_fn_name fn_def_ty_cpn.id.name substs in
+                let substs =
+                  substs @ List.init fn_def_ty_cpn.late_bound_generic_param_count
+                    (fun _ : D.generic_arg -> {kind = Lifetime {id = "'erased"}})
+                in
+                Args.body_tr_defs_ctx.fn_specializer fn_name substs
           in
           let* substs =
             ListAux.try_map
@@ -7747,8 +7901,8 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
     | UInt uintTy1, UInt uintTy2 -> if uintTy1 = uintTy2 then Some env else None
     | Adt { id = id1; substs = substs1 }, Adt { id = id2; substs = substs2 } ->
         if canonicalize_item_name id1.name = canonicalize_item_name id2.name then match_gen_arg_lists env substs1 substs2 else None
-    | ( RawPtr { ty = ty1; mutability = mut1 },
-        RawPtr { ty = ty2; mutability = mut2 } ) ->
+    | ( RawPtr { ty = ty1; mutability = mut1; _ },
+        RawPtr { ty = ty2; mutability = mut2; _ } ) ->
         if mut1 = mut2 then match_types env ty1 ty2 else None
     | _ -> None
 
@@ -8217,8 +8371,15 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
             bodies_cpn
         else bodies_cpn
       in
+      (* The core::sync::atomic docs guarantee that Relaxed loads of at most
+         eight bytes work on read-only memory when target_arch is x86_64 or
+         aarch64. *)
+      let small_relaxed_loads =
+        let triple = VfMirRd.VfMir.target_triple_get vf_mir_cpn in
+        List.exists (fun arch -> String.starts_with ~prefix:arch triple) ["x86_64-"; "aarch64-"]
+      in
       let body_tr_defs_ctx =
-        { adt_defs; directives = vf_mir_translator_directives; fn_specializer }
+        { adt_defs; directives = vf_mir_translator_directives; small_relaxed_loads; fn_specializer }
       in
       (* Ghost code in an inherent impl refers to the impl's self type as Self. Each
          such function gets a type alias for it, generic over the impl's parameters. *)
