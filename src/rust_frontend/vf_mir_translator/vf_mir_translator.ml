@@ -484,9 +484,37 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
     let annot : Mir.annot = { span; raw } in
     Ok annot
 
+  (* In a function of an inherent impl block, the name that stands for Self in
+     ghost code, applied to the impl's generic parameters. *)
+  let self_type_alias : string option ref = ref None
+
+  (* Replaces each occurrence of the identifier Self in [raw] with [alias]. *)
+  let replace_self_ident alias raw =
+    let is_ident_char c =
+      match c with 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> true | _ -> false
+    in
+    let n = String.length raw in
+    let buf = Buffer.create n in
+    let rec iter i =
+      if i >= n then ()
+      else if i + 4 <= n && String.sub raw i 4 = "Self"
+              && (i = 0 || not (is_ident_char raw.[i - 1]))
+              && (i + 4 = n || not (is_ident_char raw.[i + 4])) then begin
+        Buffer.add_string buf alias;
+        iter (i + 4)
+      end else begin
+        Buffer.add_char buf raw.[i];
+        iter (i + 1)
+      end
+    in
+    iter 0;
+    Buffer.contents buf
+
   let translate_annot_to_vf_parser_inp ({ span; raw } : Mir.annot) =
     let spos, epos = Ast.lexed_loc span in
-    (spos, raw)
+    match !self_type_alias with
+    | None -> (spos, raw)
+    | Some alias -> (spos, replace_self_ident alias raw)
 
   let translate_contract (contract_cpn : ContractRd.t) =
     let open ContractRd in
@@ -4801,7 +4829,31 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
                     (TraitRd.RequiredFn.contract_get required_fn_cpn)))
       else required_fns
     in
-    ListAux.try_map (translate_trait_required_fn adt_defs name) required_fns
+    let* required_fn_decls =
+      ListAux.try_map (translate_trait_required_fn adt_defs name) required_fns
+    in
+    (* <T as Trait>::Assoc has typeid Trait::Assoc_typeid<T>(), as for traits
+       declared in .rsspec files. *)
+    let assoc_typeid_decls =
+      TraitRd.sized_assoc_types_get_list trait_cpn
+      |> List.map (fun assoc_type ->
+             let loc = Ast.dummy_loc in
+             Ast.Func
+               ( loc,
+                 Ast.Fixpoint,
+                 Ast.unbounded_tparams [ "Self" ],
+                 Some (Ast.PtrTypeExpr (loc, Ast.ManifestTypeExpr (loc, Ast.Void))),
+                 Printf.sprintf "%s::%s_typeid" name assoc_type,
+                 [],
+                 false,
+                 (None, None),
+                 None,
+                 false,
+                 None,
+                 false,
+                 [] ))
+    in
+    Ok (assoc_typeid_decls @ required_fn_decls)
 
   let decode_clause (clause_cpn : D.clause) =
     match clause_cpn with
@@ -8109,12 +8161,37 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
       let body_tr_defs_ctx =
         { adt_defs; directives = vf_mir_translator_directives; fn_specializer }
       in
+      (* Ghost code in an inherent impl refers to the impl's self type as Self. Each
+         such function gets a type alias for it, generic over the impl's parameters. *)
+      let self_alias_decls = ref [] in
       let* bodies_tr_res =
         Rocq_writer.rocq_print Args.rocq_writer "Definition bodies := ";
         Rocq_writer.rocq_print_big_list Args.rocq_writer @@ fun () ->
-        bodies_cpn |> ListAux.try_map @@ fun body_cpn ->
+        bodies_cpn |> List.mapi (fun i body_cpn -> (i, body_cpn)) |> ListAux.try_map @@ fun (i, body_cpn) ->
           Rocq_writer.rocq_print_big_list_element Args.rocq_writer @@ fun () ->
-          translate_body body_tr_defs_ctx body_cpn
+          let* () =
+            if BodyRd.is_inherent_impl_fn_get body_cpn then begin
+              let* loc = translate_span_data (BodyRd.fn_sig_span_get body_cpn) in
+              let* self_ty = translate_ty (BodyRd.inherent_impl_self_ty_get body_cpn) loc in
+              let impl_params =
+                BodyRd.impl_block_generics_get_list body_cpn
+                |> List.map translate_generic_param_def |> List.map fst
+              in
+              let alias = Printf.sprintf "Self__%d" i in
+              let module_path = BodyRd.module_def_path_get body_cpn in
+              let full_name = if module_path = "" then alias else module_path ^ "::" ^ alias in
+              self_alias_decls := Ast.TypedefDecl (loc, self_ty.vf_ty, full_name, impl_params) :: !self_alias_decls;
+              self_type_alias :=
+                Some (if impl_params = [] then alias else alias ^ "<" ^ String.concat ", " impl_params ^ ">");
+              Ok ()
+            end else begin
+              self_type_alias := None;
+              Ok ()
+            end
+          in
+          let result = translate_body body_tr_defs_ctx body_cpn in
+          self_type_alias := None;
+          result
       in
       Rocq_writer.rocq_print Args.rocq_writer ".\n";
       let body_sig_opts, body_decls, debug_infos =
@@ -8138,7 +8215,7 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
       let decls =
         List.map
           (modularize_decl module_imports_map)
-          (ty_alias_decls @ traits_decls @ trait_impl_prototypes @ adt_decls @ aux_decls
+          (ty_alias_decls @ !self_alias_decls @ traits_decls @ trait_impl_prototypes @ adt_decls @ aux_decls
          @ adts_full_bor_content_preds @ adts_proof_obligs)
         @ ghost_decls
         @ List.map

@@ -619,6 +619,8 @@ let fns_to_be_inlined: (string * body) list =
       clauses=[];
       is_trait_fn=false;
       is_drop_fn=false;
+      is_inherent_impl_fn=false;
+      inherent_impl_self_ty={kind=Tuple []};
       visibility=Public;
     }
   );
@@ -716,6 +718,8 @@ let fns_to_be_inlined: (string * body) list =
     clauses=[];
     is_trait_fn=false;
     is_drop_fn=false;
+    is_inherent_impl_fn=false;
+    inherent_impl_self_ty={kind=Tuple []};
     visibility=Public;
   }
   );
@@ -955,6 +959,8 @@ let fns_to_be_inlined: (string * body) list =
     clauses=[];
     is_trait_fn=false;
     is_drop_fn=false;
+    is_inherent_impl_fn=false;
+    inherent_impl_self_ty={kind=Tuple []};
     visibility=Public;
   });
   ("std::result::Result::<T, E>::map_err",
@@ -1193,6 +1199,8 @@ let fns_to_be_inlined: (string * body) list =
     clauses=[];
     is_trait_fn=false;
     is_drop_fn=false;
+    is_inherent_impl_fn=false;
+    inherent_impl_self_ty={kind=Tuple []};
     visibility=Public;
   });
   ("std::option::Option::<T>::map",
@@ -1409,6 +1417,8 @@ let fns_to_be_inlined: (string * body) list =
     clauses=[];
     is_trait_fn=false;
     is_drop_fn=false;
+    is_inherent_impl_fn=false;
+    inherent_impl_self_ty={kind=Tuple []};
     visibility=Public;
   });
   "std::option::Option::<T>::unwrap_or_else",
@@ -1589,6 +1599,8 @@ let fns_to_be_inlined: (string * body) list =
     clauses=[];
     is_trait_fn=false;
     is_drop_fn=false;
+    is_inherent_impl_fn=false;
+    inherent_impl_self_ty={kind=Tuple []};
     visibility=Public;
   }
 ]
