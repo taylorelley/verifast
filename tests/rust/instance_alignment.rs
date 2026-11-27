@@ -31,4 +31,29 @@ pub fn not_exported(_p: *mut Wrap<u32>)
     //@ assert std::mem::align_of::<Wrap<u16> >() == 2; //~should_fail
 }
 
+// A bound on an associated type can fix the layout of an instance in one
+// function. The fact must not be generalized to every type argument.
+pub trait Primitive {
+    type Storage;
+}
+
+#[repr(C)]
+pub struct Cell<T: Primitive> {
+    v: T::Storage,
+}
+
+pub fn narrowed<T: Primitive<Storage = u8>>(_p: *mut Cell<T>)
+//@ req true;
+//@ ens true;
+{
+    //@ assert std::mem::align_of::<Cell<T> >() == 1; //~should_fail
+}
+
+pub fn widened<T: Primitive<Storage = u64>>(_p: *mut Cell<T>)
+//@ req true;
+//@ ens true;
+{
+    //@ assert std::mem::align_of::<Cell<T> >() == 8; //~should_fail
+}
+
 fn main() {}

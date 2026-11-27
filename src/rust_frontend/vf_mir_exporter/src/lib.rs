@@ -1182,6 +1182,12 @@ use rustc_span::RemapPathScopeComponents;
                 }
                 let sig = tcx.fn_sig(fn_did).instantiate_identity().skip_normalization().skip_binder();
                 let env = ty::TypingEnv::post_analysis(tcx, fn_did);
+                // A projection bound such as T: Trait<Assoc = u8> can fix the layout of a
+                // field of type T::Assoc. A fact quantified over T would drop that bound, so
+                // such a function contributes only instances that mention no type parameters.
+                let has_projection_bounds = env.param_env.caller_bounds().any(|clause| {
+                    matches!(clause.kind().skip_binder(), ty::ClauseKind::Projection(_))
+                });
                 for sig_ty in sig.inputs_and_output.iter() {
                     for arg in sig_ty.walk() {
                         let Some(ty) = arg.as_type() else { continue };
@@ -1204,6 +1210,9 @@ use rustc_span::RemapPathScopeComponents;
                                     }
                                 }
                             }
+                        }
+                        if has_projection_bounds && !type_params.is_empty() {
+                            continue;
                         }
                         instances.push((args, type_params, layout.align.abi.bytes()));
                     }
