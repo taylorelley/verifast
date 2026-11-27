@@ -488,15 +488,42 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
      ghost code, applied to the impl's generic parameters. *)
   let self_type_alias : string option ref = ref None
 
-  (* Replaces each occurrence of the identifier Self in [raw] with [alias]. *)
+  (* Replaces each occurrence of the identifier Self in [raw] with [alias].
+     String literals, character literals and comments are copied unchanged. *)
   let replace_self_ident alias raw =
     let is_ident_char c =
       match c with 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> true | _ -> false
     in
     let n = String.length raw in
     let buf = Buffer.create n in
-    let rec iter i =
+    (* Copies raw.[i..j-1] and continues at j. *)
+    let rec copy_to i j = Buffer.add_string buf (String.sub raw i (j - i)); iter j
+    (* The index just past the closing quote of the literal opened at i. *)
+    and literal_end q i =
+      let rec go k =
+        if k >= n then n
+        else if raw.[k] = '\\' then go (k + 2)
+        else if raw.[k] = q then k + 1
+        else go (k + 1)
+      in
+      min n (go (i + 1))
+    and iter i =
       if i >= n then ()
+      else if raw.[i] = '"' then copy_to i (literal_end '"' i)
+      else if raw.[i] = '\'' && i + 2 < n && raw.[i + 1] <> '\\' && raw.[i + 2] = '\'' then
+        copy_to i (i + 3)
+      else if raw.[i] = '\'' && i + 1 < n && raw.[i + 1] = '\\' then copy_to i (literal_end '\'' i)
+      (* Ordinary comments; //@ and /*@ start annotations, which are code. *)
+      else if i + 1 < n && raw.[i] = '/' && raw.[i + 1] = '/' && (i + 2 >= n || raw.[i + 2] <> '@') then
+        copy_to i (match String.index_from_opt raw i '\n' with Some j -> j | None -> n)
+      else if i + 1 < n && raw.[i] = '/' && raw.[i + 1] = '*' && (i + 2 >= n || raw.[i + 2] <> '@') then begin
+        let rec close k =
+          if k + 1 >= n then n
+          else if raw.[k] = '*' && raw.[k + 1] = '/' then k + 2
+          else close (k + 1)
+        in
+        copy_to i (close (i + 2))
+      end
       else if i + 4 <= n && String.sub raw i 4 = "Self"
               && (i = 0 || not (is_ident_char raw.[i - 1]))
               && (i + 4 = n || not (is_ident_char raw.[i + 4])) then begin
@@ -8172,7 +8199,19 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
           let* () =
             if BodyRd.is_inherent_impl_fn_get body_cpn then begin
               let* loc = translate_span_data (BodyRd.fn_sig_span_get body_cpn) in
-              let* self_ty = translate_ty (BodyRd.inherent_impl_self_ty_get body_cpn) loc in
+              (* A self type that ghost code cannot name, for example one with
+                 lifetime arguments, gets no alias. Ghost code that uses Self
+                 there is then reported as using an unknown type. *)
+              let self_ty =
+                try
+                  match translate_ty (BodyRd.inherent_impl_self_ty_get body_cpn) loc with
+                  | Ok self_ty -> Some self_ty
+                  | Error _ -> None
+                with Ast.StaticError _ -> None
+              in
+              match self_ty with
+              | None -> self_type_alias := None; Ok ()
+              | Some self_ty ->
               let impl_params =
                 BodyRd.impl_block_generics_get_list body_cpn
                 |> List.map translate_generic_param_def |> List.map fst
