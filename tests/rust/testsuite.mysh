@@ -17,6 +17,9 @@ verifast -allow_should_fail -allow_dead_code assume_stmt.rs
 verifast hidden_locals.rs
 verifast -allow_should_fail -allow_dead_code this_pred.rs
 verifast use_decls_in_modules.rs
+verifast -allow_should_fail -allow_assume -allow_dead_code pred_ctor_generic_args.rs
+verifast -allow_should_fail macro_fn_specs.rs
+verifast -allow_should_fail -allow_dead_code pred_ctor_infer_targs.rs
 begin_sequential
 cd unverified
   cd platform

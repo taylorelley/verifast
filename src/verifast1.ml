@@ -7036,6 +7036,9 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
               | Some bs -> (targs, bs, [])
           in
           if List.length ps0 <> List.length ts0 then static_error l "Incorrect number of indexes." None;
+          (* The arguments of a generic predicate constructor have types that mention
+             its type parameters, like the predicate's own parameters. *)
+          let ts0 = List.map (instantiate_type tpenv) ts0 in
           let (wps0, tenv) = check_pats (pn,ilist) l tparams tenv ts0 ps0 in
           let xs' = List.map (instantiate_type tpenv) xs in
           let (wps, tenv) = check_pats (pn,ilist) l tparams tenv xs' ps in

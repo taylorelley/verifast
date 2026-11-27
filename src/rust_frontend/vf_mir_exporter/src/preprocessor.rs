@@ -68,7 +68,7 @@ pub enum GhostRangeKind {
     Mut,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct GhostRange {
     in_fn_body: bool,
     pub kind: GhostRangeKind,
