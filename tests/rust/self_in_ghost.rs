@@ -47,4 +47,27 @@ impl Wrap<u32> {
     }
 }
 
+// Self inside a string literal is not the self type.
+impl Wrap<u16> {
+    pub fn literal()
+    //@ req true;
+    //@ ens length("Self") == 4;
+    {
+    }
+}
+
+// An impl whose self type ghost code cannot name still verifies when the
+// annotations do not use Self.
+pub enum Borrowed<'a> {
+    Byte(&'a u8),
+}
+
+impl<'a> Borrowed<'a> {
+    pub fn unused_self()
+    //@ req true;
+    //@ ens true;
+    {
+    }
+}
+
 fn main() {}
