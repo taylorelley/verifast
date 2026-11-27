@@ -1268,6 +1268,11 @@ use rustc_span::RemapPathScopeComponents;
                             Self::encode_typesystem_constant(enc_ctx.tcx, enc_ctx, &const_, term_cpn.init_const()),
                     }
                 }
+                ty::ClauseKind::ConstArgHasType(const_, ty) => {
+                    let mut const_arg_cpn = clause_cpn.init_const_arg_has_type();
+                    Self::encode_typesystem_constant(enc_ctx.tcx, enc_ctx, &const_, const_arg_cpn.reborrow().init_const());
+                    Self::encode_ty(enc_ctx.tcx, enc_ctx, ty, const_arg_cpn.init_ty());
+                }
                 _ => clause_cpn.set_ignored(()),
             }
         }
