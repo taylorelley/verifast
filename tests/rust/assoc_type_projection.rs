@@ -24,6 +24,12 @@ pub struct Cell2<T: ExplicitlySized> {
     v: T::Storage,
 }
 
+// A projection of an associated type of a trait declared in an .rsspec file.
+pub struct Peeked<I: Iterator> {
+    item: Option<I::Item>,
+    iter: I,
+}
+
 pub fn smoke()
 //@ req true;
 //@ ens true;

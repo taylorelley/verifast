@@ -2474,11 +2474,14 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
     iter [] structmap0 [] (List.rev structdeclmap)
 
   let sized_projection_typeids =
-    ps |> flatmap @@ fun (PackageDecl (_, pn, _, ds)) ->
+    (ps |> flatmap @@ fun (PackageDecl (_, pn, _, ds)) ->
       ds |> flatmap @@ function
         Func (_, Fixpoint, _, _, g, [], _, _, _, _, None, _, _) ->
           [if pn = "" then g else pn ^ "::" ^ g]
-      | _ -> []
+      | _ -> []) @
+    (* Typeid functions of associated types of traits in imported .rsspec files *)
+    (purefuncmap0 |> flatmap @@ fun (g, (_, _, _, params, _)) ->
+      if params = [] && String.ends_with ~suffix:"_typeid" g then [g] else [])
 
   let struct_sizedness_map1 =
     let rec sizedness_of_type t: (bool, string) Either.t =

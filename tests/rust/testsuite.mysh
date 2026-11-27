@@ -42,6 +42,8 @@ cd purely_unsafe
   verifast -allow_should_fail -allow_dead_code atomic_intrinsics.rs
   !verifast atomic_intrinsics_bad_ordering.rs
   !verifast atomic_intrinsics_wide_ptr.rs
+  !verifast atomic_intrinsics_mismatched_operands.rs
+  !verifast atomic_intrinsics_extrema_signedness.rs
   verifast enum_discr.rs
   verifast -ignore_unwind_paths leftpad.rs
   verifast arrays.rs
