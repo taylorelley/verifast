@@ -2473,6 +2473,16 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
     in
     iter [] structmap0 [] (List.rev structdeclmap)
 
+  let sized_projection_typeids =
+    (ps |> flatmap @@ fun (PackageDecl (_, pn, _, ds)) ->
+      ds |> flatmap @@ function
+        Func (_, Fixpoint, _, _, g, [], _, _, _, _, None, _, _) ->
+          [if pn = "" then g else pn ^ "::" ^ g]
+      | _ -> []) @
+    (* Typeid functions of associated types of traits in imported .rsspec files *)
+    (purefuncmap0 |> flatmap @@ fun (g, (_, _, _, params, _)) ->
+      if params = [] && String.ends_with ~suffix:"_typeid" g then [g] else [])
+
   let struct_sizedness_map1 =
     let rec sizedness_of_type t: (bool, string) Either.t =
       match unfold_inferred_type t with
@@ -2491,7 +2501,14 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
       | BoundedGhostTypeParam (x, _) -> Right x
       | InferredType _ -> failwith "sizedness_of_type: called on unresolved inferred type"
       | ProjectionType (t, traitName, traitArgs, assocTypeName) ->
-        failwith "sizedness_of_type: TODO: projection types"
+        (* Only Sized associated types receive a typeid function: the Rust
+           frontend exports them from the trait's item bounds, and .rsspec
+           files cannot declare ?Sized associated types. Other projections
+           are still rejected. *)
+        if List.mem (traitName ^ "::" ^ assocTypeName ^ "_typeid") sized_projection_typeids then
+          Left true
+        else
+          failwith "sizedness_of_type: TODO: projection types"
     and get_struct_sizedness sn =
       match try_assoc sn struct_sizedness_map1 with
         Some (l, state_ref) -> finish_struct_sizedness_checking l sn state_ref
@@ -6514,6 +6531,33 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
         ctxt#assume_forall name [trigger] (List.map (fun x -> ctxt#type_inductive) tparams) fact
       end
     in
+    List.iter (function
+      | RustcAbiAlignment n ->
+        if dialect <> Some Rust || tparams <> [] || n <= 0 || n land (n - 1) <> 0 then
+          static_error l "Invalid compiler-exported concrete ABI alignment" None;
+        let type_info = ctxt#mk_app type_info_func [] in
+        ctxt#assert_term (ctxt#mk_eq (mk_alignof type_info) (ctxt#mk_intlit n))
+      | RustcInstanceAlignment (qtparams, targ_tes, n) ->
+        (* The alignment rustc computed for this instance. If the instance mentions
+           type parameters, rustc computed it without knowing them. *)
+        if dialect <> Some Rust || n <= 0 || n land (n - 1) <> 0 || List.length targ_tes <> List.length tparams then
+          static_error l "Invalid compiler-exported instance alignment" None;
+        (* An instance mentioning a type that VeriFast does not know gets no fact. *)
+        begin match List.map (check_pure_type ("", []) qtparams Ghost) targ_tes with
+          exception StaticError _ -> ()
+        | targs ->
+        if qtparams = [] then
+          ctxt#assert_term (ctxt#mk_eq (mk_alignof (ctxt#mk_app type_info_func (List.map (typeid_of_core l []) targs))) (ctxt#mk_intlit n))
+        else begin
+          ctxt#begin_formal;
+          let env = List.mapi (fun i x -> (tparam_typeid_varname x, ctxt#mk_bound i ctxt#type_inductive)) qtparams in
+          let a = mk_alignof (ctxt#mk_app type_info_func (List.map (typeid_of_core l env) targs)) in
+          let fact = ctxt#mk_eq a (ctxt#mk_intlit n) in
+          ctxt#end_formal;
+          ctxt#assume_forall (sn ^ "_instance_alignment") [a] (List.map (fun _ -> ctxt#type_inductive) qtparams) fact
+        end
+        end
+      | _ -> ()) attrs;
     let packed = List.mem Packed attrs in
     let repr_c = dialect <> Some Rust || List.mem ReprC attrs in
     assume_axiom (fun _ _ s -> (sn ^ "_size_limits", s, ctxt#mk_and (ctxt#mk_lt (ctxt#mk_intlit 0) s) (ctxt#mk_le s max_uintptr_term)));
@@ -7036,6 +7080,9 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
               | Some bs -> (targs, bs, [])
           in
           if List.length ps0 <> List.length ts0 then static_error l "Incorrect number of indexes." None;
+          (* The arguments of a generic predicate constructor have types that mention
+             its type parameters, like the predicate's own parameters. *)
+          let ts0 = List.map (instantiate_type tpenv) ts0 in
           let (wps0, tenv) = check_pats (pn,ilist) l tparams tenv ts0 ps0 in
           let xs' = List.map (instantiate_type tpenv) xs in
           let (wps, tenv) = check_pats (pn,ilist) l tparams tenv xs' ps in

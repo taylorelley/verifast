@@ -105,6 +105,7 @@ type literal_const_expr =
 and const_expr =
   ParamConstExpr of string
 | LiteralConstExpr of literal_const_expr
+| BranchConstExpr of ty * const_expr list (* An ADT, tuple or array value, such as an enum variant *)
 and ty =
   Bool
 | Int of int_width
@@ -145,9 +146,10 @@ let string_of_literal_const_expr = function
 | USizeValue (size, i) -> Printf.sprintf "USizeValue %d %s" size (Stdint.Uint64.to_string i)
 | CharValue i -> Printf.sprintf "CharValue %s" (Stdint.Uint32.to_string i)
 
-let string_of_const_expr = function
+let rec string_of_const_expr = function
   ParamConstExpr param -> Printf.sprintf "ParamConstExpr %s" param
 | LiteralConstExpr literal -> string_of_literal_const_expr literal
+| BranchConstExpr (_, elems) -> Printf.sprintf "BranchConstExpr [%s]" (String.concat "; " (List.map string_of_const_expr elems))
 
 let rec string_of_ty = function
   Bool -> "Bool"
@@ -297,7 +299,7 @@ and decode_const_expr genv const_cpn =
     let valtree = value_cpn.val_tree in
     match valtree with
       Leaf scalar_int_cpn -> LiteralConstExpr (decode_scalar_int ty scalar_int_cpn)
-    | Branch _ -> failwith "Branch not supported"
+    | Branch elems -> BranchConstExpr (ty, List.map (decode_const_expr genv) elems)
 
 type call_path = basic_block_path option
 and basic_block_path = {bb_caller: basic_block_path option; bb_index: int}
@@ -427,10 +429,10 @@ let fns_to_be_inlined: (string * body) list =
       [
         {id={name="result"}; ty={kind=Param "T"}; mutability=Not; source_info={span}};
         {id={name="self"}; ty={kind=Adt {id={name="std::boxed::Box"}; kind=StructKind; substs=[{kind=Type {kind=Param "T"}}; {kind=Type {kind=Param "A"}}]}}; mutability=Not; source_info={span}};
-        {id={name="contents_ptr"}; ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}}}; mutability=Not; source_info={span}};
+        {id={name="contents_ptr"}; ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}; is_thin=false}}; mutability=Not; source_info={span}};
         {id={name="ref_self"}; ty={kind=Ref {region={id="'<erased>"}; mutability=Mut; ty={kind=Adt {id={name="std::boxed::Box"}; kind=StructKind; substs=[{kind=Type {kind=Param "T"}}; {kind=Type {kind=Param "A"}}]}}}}; mutability=Not; source_info={span}};
         {id={name="drop_result"}; ty={kind=Tuple []}; mutability=Not; source_info={span}};
-        {id={name="contents_ptr2"}; ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}}}; mutability=Not; source_info={span}};
+        {id={name="contents_ptr2"}; ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}; is_thin=false}}; mutability=Not; source_info={span}};
       ]
     in
     let basic_blocks: basic_block list =
@@ -451,7 +453,7 @@ let fns_to_be_inlined: (string * body) list =
                     local_is_mutable=false;
                     kind=Other
                   };
-                  ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}}}
+                  ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}; is_thin=false}}
                 }
               };
               source_info={span}
@@ -481,7 +483,7 @@ let fns_to_be_inlined: (string * body) list =
                     local_is_mutable=false;
                     kind=Other
                   };
-                  ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}}}
+                  ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}; is_thin=false}}
                 }
               };
               source_info={span}
@@ -619,6 +621,8 @@ let fns_to_be_inlined: (string * body) list =
       clauses=[];
       is_trait_fn=false;
       is_drop_fn=false;
+      is_inherent_impl_fn=false;
+      inherent_impl_self_ty={kind=Tuple []};
       visibility=Public;
     }
   );
@@ -632,7 +636,7 @@ let fns_to_be_inlined: (string * body) list =
   in
   let local_decls: local_decl list =
     [
-      {id={name="result"}; ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}}}; mutability=Not; source_info={span}};
+      {id={name="result"}; ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}; is_thin=false}}; mutability=Not; source_info={span}};
       {id={name="self"}; ty={kind=Ref {region={id="'<erased>"}; mutability=Not; ty={kind=Adt {id={name="std::boxed::Box"}; kind=StructKind; substs=[{kind=Type {kind=Param "T"}}]}}}}; mutability=Not; source_info={span}};
       {id={name="b"}; ty={kind=Adt {id={name="std::boxed::Box"}; kind=StructKind; substs=[{kind=Type {kind=Param "T"}}]}}; mutability=Not; source_info={span}};
     ]
@@ -667,7 +671,7 @@ let fns_to_be_inlined: (string * body) list =
                   local_is_mutable=false;
                   kind=Other
                 };
-                ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}}}
+                ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}; is_thin=false}}
               }
             };
             source_info={span}
@@ -684,7 +688,7 @@ let fns_to_be_inlined: (string * body) list =
     def_path="std::boxed::Box::<T, A>::as_ptr";
     module_def_path="std::boxed";
     contract={annotations=[]; span};
-    output={kind=RawPtr {mutability=Not; ty={kind=Param "T"}}};
+    output={kind=RawPtr {mutability=Not; ty={kind=Param "T"}; is_thin=false}};
     inputs=[
       {kind=Ref {region={id="'<erased>"}; mutability=Not; ty={kind=Adt {id={name="std::boxed::Box"}; kind=StructKind; substs=[{kind=Type {kind=Param "T"}}]}}}};
     ];
@@ -716,6 +720,8 @@ let fns_to_be_inlined: (string * body) list =
     clauses=[];
     is_trait_fn=false;
     is_drop_fn=false;
+    is_inherent_impl_fn=false;
+    inherent_impl_self_ty={kind=Tuple []};
     visibility=Public;
   }
   );
@@ -955,6 +961,8 @@ let fns_to_be_inlined: (string * body) list =
     clauses=[];
     is_trait_fn=false;
     is_drop_fn=false;
+    is_inherent_impl_fn=false;
+    inherent_impl_self_ty={kind=Tuple []};
     visibility=Public;
   });
   ("std::result::Result::<T, E>::map_err",
@@ -1193,6 +1201,8 @@ let fns_to_be_inlined: (string * body) list =
     clauses=[];
     is_trait_fn=false;
     is_drop_fn=false;
+    is_inherent_impl_fn=false;
+    inherent_impl_self_ty={kind=Tuple []};
     visibility=Public;
   });
   ("std::option::Option::<T>::map",
@@ -1409,6 +1419,8 @@ let fns_to_be_inlined: (string * body) list =
     clauses=[];
     is_trait_fn=false;
     is_drop_fn=false;
+    is_inherent_impl_fn=false;
+    inherent_impl_self_ty={kind=Tuple []};
     visibility=Public;
   });
   "std::option::Option::<T>::unwrap_or_else",
@@ -1589,6 +1601,8 @@ let fns_to_be_inlined: (string * body) list =
     clauses=[];
     is_trait_fn=false;
     is_drop_fn=false;
+    is_inherent_impl_fn=false;
+    inherent_impl_self_ty={kind=Tuple []};
     visibility=Public;
   }
 ]
@@ -2257,6 +2271,13 @@ let check_clause_refines_clause genv0 clause0 genv1 clause1 =
       let generic_args0 = trait_clause0.args in
       let generic_args1 = trait_clause1.args in
       if List.map (decode_gen_arg genv0) generic_args0 <> List.map (decode_gen_arg genv1) generic_args1 then failwith "The two trait clauses have different generic arguments"
+  | ConstArgHasType const_arg0, ConstArgHasType const_arg1 ->
+      let arg0 = decode_gen_arg genv0 {kind = Const const_arg0.const} in
+      let arg1 = decode_gen_arg genv1 {kind = Const const_arg1.const} in
+      if arg0 <> arg1 then failwith "The two const argument type clauses have different constants";
+      let ty0 = decode_gen_arg genv0 {kind = Type const_arg0.ty} in
+      let ty1 = decode_gen_arg genv1 {kind = Type const_arg1.ty} in
+      if ty0 <> ty1 then failwith "The two const argument type clauses have different types"
   | Projection projection_clause0, Projection projection_clause1 ->
       let proj_term0 = projection_clause0.projection_term in
       let proj_term1 = projection_clause1.projection_term in
@@ -2335,6 +2356,10 @@ let check_body_refines_body bodies0 bodies1 def_path body0 body1 =
   let projection_clauses1, clauses1 = List.partition (function Projection _ -> true | _ -> false) clauses1 in
   if List.length projection_clauses0 <> List.length projection_clauses1 then failwith "The two functions have a different number of projection clauses";
   List.iter2 (fun clause0 clause1 -> check_clause_refines_clause root_genv0 clause0 root_genv1 clause1) projection_clauses0 projection_clauses1;
+  let const_arg_clauses0, clauses0 = List.partition (function ConstArgHasType _ -> true | _ -> false) clauses0 in
+  let const_arg_clauses1, clauses1 = List.partition (function ConstArgHasType _ -> true | _ -> false) clauses1 in
+  if List.length const_arg_clauses0 <> List.length const_arg_clauses1 then failwith "The two functions have a different number of const argument type clauses";
+  List.iter2 (fun clause0 clause1 -> check_clause_refines_clause root_genv0 clause0 root_genv1 clause1) const_arg_clauses0 const_arg_clauses1;
   if clauses0 <> [] || clauses1 <> [] then failwith "Clause kind not supported";
   let inputs0 = body0.inputs in
   let inputs1 = body1.inputs in
