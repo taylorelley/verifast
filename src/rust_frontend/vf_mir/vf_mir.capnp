@@ -279,6 +279,17 @@ struct AdtDef {
     clauses @7: List(Clause);
     implementsDrop @8: Bool;
     isReprC @11: Bool;
+    knownAlignment @12: UInt64; # Zero if unavailable or generic.
+    struct InstanceAlignment {
+        # The ABI alignment that rustc computes for this ADT applied to genericArgs,
+        # in the typing environment of a local function whose signature mentions
+        # the instance. typeParams lists the function's type parameters occurring
+        # in genericArgs; the layout was computed without knowing them.
+        genericArgs @0: List(GenericArg);
+        typeParams @1: List(Text);
+        alignment @2: UInt64;
+    }
+    instanceAlignments @13: List(InstanceAlignment);
 }
 
 enum AliasTyKind {
