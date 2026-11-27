@@ -418,11 +418,16 @@ struct Clause {
         projectionTerm @0: AliasTerm;
         term @1: Term; # G
     }
+    struct ConstArgHasType { # const parameter C has type T
+        const @0: TyConst;
+        ty @1: Ty;
+    }
     union {
         outlives @0: Outlives;
         trait @2: Trait;
         projection @3: Projection;
         ignored @1: Void; # A clause that we are ignoring for now
+        constArgHasType @4: ConstArgHasType;
     }
 }
 

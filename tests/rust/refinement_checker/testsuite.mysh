@@ -1,6 +1,9 @@
 begin_parallel
   !refinement-checker missing_func_orig.rs missing_func_verified.rs
   refinement-checker basic_orig.rs basic_verified.rs
+  refinement-checker const_args_orig.rs const_args_verified.rs
+  !refinement-checker const_args_orig.rs const_args_verified_bad.rs
+  !refinement-checker const_param_type_orig.rs const_param_type_verified_bad.rs
   !refinement-checker basic_orig.rs basic_verified_bad1.rs
   !refinement-checker basic_orig.rs basic_verified_bad2.rs
   refinement-checker loop_orig.rs loop_verified.rs
