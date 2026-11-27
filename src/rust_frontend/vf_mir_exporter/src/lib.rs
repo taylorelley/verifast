@@ -930,6 +930,7 @@ use rustc_span::RemapPathScopeComponents;
             // Encode traits (consumes annotations)
             self.encode_traits(&mut req_adt_defs, vf_mir_cpn.reborrow());
 
+            let mut expansion_spans = Vec::new();
             vf_mir_cpn.fill_bodies(&self.bodies, |mut body_cpn, (body, span)| {
                 Self::encode_span_data(
                     self.tcx,
@@ -937,17 +938,24 @@ use rustc_span::RemapPathScopeComponents;
                     body_cpn.reborrow().init_fn_sig_span(),
                 );
                 let body_span = body.span.data();
-                let mut annots = self
-                    .annots
-                    .extract_if(|annot| {
-                        body_span.contains(
-                            annot
-                                .span()
-                                .expect("Dummy annot found during serialization")
-                                .data(),
-                        )
-                    })
-                    .collect::<LinkedList<_>>();
+                let in_body = |annot: &Box<GhostRange>| {
+                    body_span.contains(
+                        annot
+                            .span()
+                            .expect("Dummy annot found during serialization")
+                            .data(),
+                    )
+                };
+                // All expansions of a macro share the annotations written in the macro
+                // body, so each such body gets its own copy. They are removed once all
+                // bodies are encoded.
+                let mut annots = if body.span.from_expansion() {
+                    let shared = self.annots.iter().filter(|annot| in_body(annot)).cloned().collect::<LinkedList<_>>();
+                    expansion_spans.push(body_span);
+                    shared
+                } else {
+                    self.annots.extract_if(|annot| in_body(annot)).collect::<LinkedList<_>>()
+                };
                 let mut_annots = annots.extract_if(|annot| {
                     annot.kind == GhostRangeKind::Mut
                 }).map(|annot| {
@@ -958,6 +966,12 @@ use rustc_span::RemapPathScopeComponents;
                 Self::encode_body(&mut enc_ctx, body_cpn);
                 req_adt_defs.extend(enc_ctx.get_req_adts());
             });
+            for span in expansion_spans {
+                let _ = self
+                    .annots
+                    .extract_if(|annot| span.contains(annot.span().expect("Dummy annot").data()))
+                    .count();
+            }
 
             // Encode directives
             vf_mir_cpn.fill_directives(&self.directives, |directive_cpn, directive| {

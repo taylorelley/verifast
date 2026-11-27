@@ -1399,7 +1399,10 @@ module VerifyProgram(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
             end
           | Some (PredCtorInfo (lp, predctor_tparams, ps1, ps2, inputParamCount, body, funcsym)) ->
             reportUseSite DeclKind_Predicate lp l;
+            (* Without explicit type arguments, they are inferred from the constructor arguments. *)
+            let infer_targs = targs = [] && predctor_tparams <> [] in
             let tpenv =
+              if infer_targs then List.map (fun x -> (x, InferredType (object end, ref Unconstrained))) predctor_tparams else
               match zip predctor_tparams targs with
                 Some bs -> bs
               | None -> static_error l "Incorrect number of type arguments" None
@@ -1416,6 +1419,14 @@ module VerifyProgram(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
                   (x, prover_convert_term v t' t)
                 | _ -> static_error l "Predicate constructor arguments must be expressions." None
                 end
+            in
+            let tpenv =
+              if not infer_targs then tpenv else
+              tpenv |> List.map begin fun (x, tp) ->
+                match unfold_inferred_type tp with
+                  InferredType _ -> static_error l ("Cannot infer type argument " ^ x ^ " of this predicate constructor; please supply the type arguments.") None
+                | tp -> (x, tp)
+              end
             in
             let targs_typeids = List.map (fun (x, tp) -> (x ^ "_typeid", typeid_of_core l env tp)) tpenv in
             let g_symb = mk_app funcsym (List.map snd targs_typeids @ List.map (fun (x, t) -> t) bs0) in
@@ -1751,9 +1762,12 @@ module VerifyProgram(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
               end
             | Some (PredCtorInfo (lpred, predctor_tparams, ps1, ps2, inputParamCount, body, funcsym)) ->
               reportUseSite DeclKind_Predicate lpred l;
+              (* Without explicit type arguments, they are inferred from the constructor arguments. *)
+              let infer_targs = targs = [] && predctor_tparams <> [] in
               let tpenv =
+                if infer_targs then List.map (fun x -> (x, InferredType (object end, ref Unconstrained))) predctor_tparams else
                 match zip predctor_tparams targs with
-                  Some tpenv -> tpenv
+                  Some bs -> bs
                 | None -> static_error l "Incorrect number of type arguments" None
               in
               let bs0 =
@@ -1768,6 +1782,14 @@ module VerifyProgram(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
                     (x, prover_convert_term v t' t)
                   | _ -> static_error l "Predicate constructor arguments must be expressions." None
                   end
+              in
+              let tpenv =
+                if not infer_targs then tpenv else
+                tpenv |> List.map begin fun (x, tp) ->
+                  match unfold_inferred_type tp with
+                    InferredType _ -> static_error l ("Cannot infer type argument " ^ x ^ " of this predicate constructor; please supply the type arguments.") None
+                  | tp -> (x, tp)
+                end
               in
               let targs_typeids = List.map (fun (x, tp) -> (x ^ "_typeid", typeid_of_core l env tp)) tpenv in
               let g_symb = mk_app funcsym (List.map snd targs_typeids @ List.map (fun (x, t) -> t) bs0) in
