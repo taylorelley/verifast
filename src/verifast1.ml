@@ -6533,6 +6533,33 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
         ctxt#assume_forall name [trigger] (List.map (fun x -> ctxt#type_inductive) tparams) fact
       end
     in
+    List.iter (function
+      | RustcAbiAlignment n ->
+        if dialect <> Some Rust || tparams <> [] || n <= 0 || n land (n - 1) <> 0 then
+          static_error l "Invalid compiler-exported concrete ABI alignment" None;
+        let type_info = ctxt#mk_app type_info_func [] in
+        ctxt#assert_term (ctxt#mk_eq (mk_alignof type_info) (ctxt#mk_intlit n))
+      | RustcInstanceAlignment (qtparams, targ_tes, n) ->
+        (* The alignment rustc computed for this instance. If the instance mentions
+           type parameters, rustc computed it without knowing them. *)
+        if dialect <> Some Rust || n <= 0 || n land (n - 1) <> 0 || List.length targ_tes <> List.length tparams then
+          static_error l "Invalid compiler-exported instance alignment" None;
+        (* An instance mentioning a type that VeriFast does not know gets no fact. *)
+        begin match List.map (check_pure_type ("", []) qtparams Ghost) targ_tes with
+          exception StaticError _ -> ()
+        | targs ->
+        if qtparams = [] then
+          ctxt#assert_term (ctxt#mk_eq (mk_alignof (ctxt#mk_app type_info_func (List.map (typeid_of_core l []) targs))) (ctxt#mk_intlit n))
+        else begin
+          ctxt#begin_formal;
+          let env = List.mapi (fun i x -> (tparam_typeid_varname x, ctxt#mk_bound i ctxt#type_inductive)) qtparams in
+          let a = mk_alignof (ctxt#mk_app type_info_func (List.map (typeid_of_core l env) targs)) in
+          let fact = ctxt#mk_eq a (ctxt#mk_intlit n) in
+          ctxt#end_formal;
+          ctxt#assume_forall (sn ^ "_instance_alignment") [a] (List.map (fun _ -> ctxt#type_inductive) qtparams) fact
+        end
+        end
+      | _ -> ()) attrs;
     let packed = List.mem Packed attrs in
     let repr_c = dialect <> Some Rust || List.mem ReprC attrs in
     assume_axiom (fun _ _ s -> (sn ^ "_size_limits", s, ctxt#mk_and (ctxt#mk_lt (ctxt#mk_intlit 0) s) (ctxt#mk_le s max_uintptr_term)));

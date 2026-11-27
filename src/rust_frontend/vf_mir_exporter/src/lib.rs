@@ -1142,6 +1142,74 @@ use rustc_span::RemapPathScopeComponents;
             });
             adt_def_cpn.set_implements_drop(adt_def.has_dtor(tcx));
             adt_def_cpn.set_is_repr_c(adt_def.repr().c());
+            if is_local && adt_def.is_struct() && tcx.generics_of(adt_def.did()).count() == 0 {
+                let adt_ty = tcx.type_of(adt_def.did()).instantiate_identity().skip_normalization();
+                let env = ty::TypingEnv::fully_monomorphized();
+                if let Ok(layout) = tcx.layout_of(env.as_query_input(adt_ty)) {
+                    adt_def_cpn.set_known_alignment(layout.align.abi.bytes());
+                }
+            }
+            if is_local && adt_def.is_struct() {
+                let instances = Self::instance_alignments(tcx, adt_def.did());
+                let mut instances_cpn =
+                    adt_def_cpn.reborrow().init_instance_alignments(instances.len());
+                for (i, (args, type_params, alignment)) in instances.into_iter().enumerate() {
+                    let mut instance_cpn = instances_cpn.reborrow().get(i);
+                    instance_cpn.fill_generic_args(args.iter(), |arg_cpn, arg| {
+                        Self::encode_gen_arg(tcx, enc_ctx, arg, arg_cpn);
+                    });
+                    instance_cpn.fill_type_params(type_params.iter().map(|x| x.as_str()));
+                    instance_cpn.set_alignment(alignment);
+                }
+            }
+        }
+
+        /// Collects the instances of a local struct that occur in the signatures of local
+        /// functions, with the ABI alignment rustc computes for each in the function's
+        /// typing environment. An instance is skipped if its layout depends on the
+        /// function's generic parameters, if it has lifetime or const arguments, or if
+        /// its arguments mention projections, which may have no VeriFast typeid.
+        fn instance_alignments(
+            tcx: TyCtxt<'tcx>,
+            adt_did: rustc_span::def_id::DefId,
+        ) -> Vec<(ty::GenericArgsRef<'tcx>, Vec<String>, u64)> {
+            use rustc_middle::ty::TypeVisitableExt;
+            let mut instances: Vec<(ty::GenericArgsRef<'tcx>, Vec<String>, u64)> = Vec::new();
+            for fn_did in tcx.hir_body_owners() {
+                let fn_did = fn_did.to_def_id();
+                if !matches!(tcx.def_kind(fn_did), hir::def::DefKind::Fn | hir::def::DefKind::AssocFn) {
+                    continue;
+                }
+                let sig = tcx.fn_sig(fn_did).instantiate_identity().skip_normalization().skip_binder();
+                let env = ty::TypingEnv::post_analysis(tcx, fn_did);
+                for sig_ty in sig.inputs_and_output.iter() {
+                    for arg in sig_ty.walk() {
+                        let Some(ty) = arg.as_type() else { continue };
+                        let ty::Adt(def, args) = ty.kind() else { continue };
+                        if def.did() != adt_did || ty.has_free_regions() || ty.has_escaping_bound_vars()
+                            || ty.has_aliases()
+                            || args.iter().any(|a| a.as_type().is_none())
+                            || instances.iter().any(|(a, _, _)| *a == *args)
+                        {
+                            continue;
+                        }
+                        let Ok(layout) = tcx.layout_of(env.as_query_input(ty)) else { continue };
+                        let mut type_params: Vec<String> = Vec::new();
+                        for inner in ty.walk() {
+                            if let Some(inner_ty) = inner.as_type() {
+                                if let ty::Param(param) = inner_ty.kind() {
+                                    let name = param.name.to_string();
+                                    if !type_params.contains(&name) {
+                                        type_params.push(name);
+                                    }
+                                }
+                            }
+                        }
+                        instances.push((args, type_params, layout.align.abi.bytes()));
+                    }
+                }
+            }
+            instances
         }
 
         fn encode_adt_kind(adt_kind: ty::AdtKind, mut adt_kind_cpn: adt_kind_cpn::Builder<'_>) {

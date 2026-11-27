@@ -6319,6 +6319,28 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
             let [ variant_def_no_zst ] = variants_no_zst in
             let fds_no_zst = variant_def_no_zst.fields in
             let field_defs_no_zst = List.map translate_to_vf_field_def fds_no_zst in
+            (* Alignments of instances such as Atomic<i16>, computed by rustc. *)
+            (* An instance whose type arguments VeriFast cannot represent, such as
+               Box<str>, gets no fact. *)
+            let instance_alignments =
+              instance_alignments_get_list adt_def_cpn
+              |> List.filter_map @@ fun instance_cpn ->
+                 let open AdtDefRd.InstanceAlignment in
+                 let alignment = alignment_get instance_cpn in
+                 if alignment = Stdint.Uint64.zero || alignment > Stdint.Uint64.of_int (1 lsl 29) then
+                   Ast.static_error def_loc "Invalid compiler-exported instance alignment" None;
+                 let translate arg_cpn =
+                   match translate_generic_arg (D.decode_generic_arg arg_cpn) def_loc with
+                   | Ok (Mir.GenArgType ty_info) -> Some ty_info.vf_ty
+                   | _ -> None
+                   | exception Ast.StaticError _ -> None
+                 in
+                 let targs = List.map translate (generic_args_get_list instance_cpn) in
+                 if List.mem None targs then None
+                 else
+                   Some (Ast.RustcInstanceAlignment (type_params_get_list instance_cpn,
+                     List.map Option.get targs, Stdint.Uint64.to_int alignment))
+            in
             let struct_decl =
               Ast.Struct
                 ( def_loc,
@@ -6330,7 +6352,17 @@ module Make (Args : VF_MIR_TRANSLATOR_ARGS) = struct
                       (*instance_pred_decl list*) [],
                       (*is polymorphic*) false ),
                   (*struct_attr list*)
-                  if is_repr_c_get adt_def_cpn then [ ReprC ] else [] )
+                  let repr = if is_repr_c_get adt_def_cpn then [ Ast.ReprC ] else [] in
+                  let alignment = known_alignment_get adt_def_cpn in
+                  let attrs =
+                    if alignment = Stdint.Uint64.zero then repr
+                    else begin
+                      if vf_tparams <> [] || alignment > Stdint.Uint64.of_int (1 lsl 29) then
+                        Ast.static_error def_loc "Invalid compiler-exported concrete ABI alignment" None;
+                      Ast.RustcAbiAlignment (Stdint.Uint64.to_int alignment) :: repr
+                    end
+                  in
+                  attrs @ instance_alignments )
             in
             let struct_typedef_aux =
               Ast.TypedefDecl
