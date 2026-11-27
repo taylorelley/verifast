@@ -148,6 +148,13 @@ mod num {
         
     }
 
+    impl usize {
+        fn wrapping_mul(self: usize, other: usize) -> usize;
+        //@ req true;
+        //@ ens true;
+        //@ on_unwind_ens false;
+    }
+
     /*@
     
     lem init_ref_usize(p: *usize, coef: real);
@@ -327,6 +334,50 @@ mod intrinsics {
         req true;
         ens atomic_align_of::<u8>() == 1;
     
+    lem_auto atomic_align_of_u16();
+        req true;
+        ens atomic_align_of::<u16>() == 2;
+    lem_auto atomic_align_of_i8();
+        req true;
+        ens atomic_align_of::<i8>() == 1;
+
+    lem_auto atomic_align_of_i16();
+        req true;
+        ens atomic_align_of::<i16>() == 2;
+
+    lem_auto atomic_align_of_i32();
+        req true;
+        ens atomic_align_of::<i32>() == 4;
+
+    lem_auto atomic_align_of_u32();
+        req true;
+        ens atomic_align_of::<u32>() == 4;
+
+    lem_auto atomic_align_of_i64();
+        req true;
+        ens atomic_align_of::<i64>() == 8;
+
+    lem_auto atomic_align_of_u64();
+        req true;
+        ens atomic_align_of::<u64>() == 8;
+
+    lem_auto atomic_align_of_i128();
+        req true;
+        ens atomic_align_of::<i128>() == 16;
+
+    lem_auto atomic_align_of_u128();
+        req true;
+        ens atomic_align_of::<u128>() == 16;
+
+    lem_auto atomic_align_of_isize();
+        req true;
+        ens atomic_align_of::<isize>() == std::mem::size_of::<usize>();
+
+    // Thin pointer storage on the target uses the pointer-sized atomic ABI.
+    lem atomic_align_of_ptr<T>();
+        req true;
+        ens atomic_align_of::<*T>() == std::mem::size_of::<usize>();
+
     lem_auto atomic_align_of_usize();
         req true;
         ens atomic_align_of::<usize>() == std::mem::size_of::<usize>();
@@ -358,6 +409,146 @@ mod intrinsics {
     //@ ens [f]atomic_points_to(dst, 1, inv_);
     //@ on_unwind_ens false;
     
+    // Atomic accesses to read-only memory are undefined behavior, except that
+    // sufficiently small Relaxed loads work there (see the core::sync::atomic
+    // module docs). A load therefore needs the full underlying byte permission,
+    // which denotes writable Rust storage, unless the translator dispatches it
+    // to atomic_load_relaxed_up_to_eight_bytes below.
+
+    unsafe fn atomic_load_relaxed<T>(src: *const T) -> T;
+    //@ req [?f]atomic_points_to(src as *T, 1, ?valid);
+    //@ ens [f]atomic_points_to(src as *T, 1, valid) &*& valid(result) == true;
+    //@ on_unwind_ens false;
+
+    unsafe fn atomic_load_acquire<T>(src: *const T) -> T;
+    //@ req [?f]atomic_points_to(src as *T, 1, ?valid);
+    //@ ens [f]atomic_points_to(src as *T, 1, valid) &*& valid(result) == true;
+    //@ on_unwind_ens false;
+
+    unsafe fn atomic_load_seqcst<T>(src: *const T) -> T;
+    //@ req [?f]atomic_points_to(src as *T, 1, ?valid);
+    //@ ens [f]atomic_points_to(src as *T, 1, valid) &*& valid(result) == true;
+    //@ on_unwind_ens false;
+
+    // A non-volatile Relaxed load of at most eight bytes on x86-64 or AArch64
+    // Linux. It works on read-only memory, so any byte fraction suffices.
+    unsafe fn atomic_load_relaxed_up_to_eight_bytes<T>(src: *const T) -> T;
+    //@ req [?f]atomic_points_to(src as *T, ?permission, ?valid);
+    //@ ens [f]atomic_points_to(src as *T, permission, valid) &*& valid(result) == true;
+    //@ on_unwind_ens false;
+
+    // Exchange preserves the slot invariant and returns a value satisfying it.
+    unsafe fn atomic_xchg_relaxed<T>(dst: *mut T, val: T) -> T;
+    //@ req [?f]atomic_points_to(dst, 1, ?valid) &*& valid(val) == true;
+    //@ ens [f]atomic_points_to(dst, 1, valid) &*& valid(result) == true;
+    //@ on_unwind_ens false;
+
+    unsafe fn atomic_xchg_acquire<T>(dst: *mut T, val: T) -> T;
+    //@ req [?f]atomic_points_to(dst, 1, ?valid) &*& valid(val) == true;
+    //@ ens [f]atomic_points_to(dst, 1, valid) &*& valid(result) == true;
+    //@ on_unwind_ens false;
+
+    unsafe fn atomic_xchg_release<T>(dst: *mut T, val: T) -> T;
+    //@ req [?f]atomic_points_to(dst, 1, ?valid) &*& valid(val) == true;
+    //@ ens [f]atomic_points_to(dst, 1, valid) &*& valid(result) == true;
+    //@ on_unwind_ens false;
+
+    unsafe fn atomic_xchg_acqrel<T>(dst: *mut T, val: T) -> T;
+    //@ req [?f]atomic_points_to(dst, 1, ?valid) &*& valid(val) == true;
+    //@ ens [f]atomic_points_to(dst, 1, valid) &*& valid(result) == true;
+    //@ on_unwind_ens false;
+
+    unsafe fn atomic_xchg_seqcst<T>(dst: *mut T, val: T) -> T;
+    //@ req [?f]atomic_points_to(dst, 1, ?valid) &*& valid(val) == true;
+    //@ ens [f]atomic_points_to(dst, 1, valid) &*& valid(result) == true;
+    //@ on_unwind_ens false;
+
+
+    // Both forms may write, so both require full byte permission. The
+    // safety model permits either outcome and constrains the observed value.
+    unsafe fn atomic_cxchg_safety<T>(dst: *mut T, old: T, new: T) -> (T, bool);
+    //@ req [?f]atomic_points_to(dst, 1, ?valid) &*& valid(old) == true &*& valid(new) == true;
+    //@ ens [f]atomic_points_to(dst, 1, valid) &*& valid(result.0) == true;
+    //@ on_unwind_ens false;
+
+    unsafe fn atomic_cxchgweak_safety<T>(dst: *mut T, old: T, new: T) -> (T, bool);
+    //@ req [?f]atomic_points_to(dst, 1, ?valid) &*& valid(old) == true &*& valid(new) == true;
+    //@ ens [f]atomic_points_to(dst, 1, valid) &*& valid(result.0) == true;
+    //@ on_unwind_ens false;
+
+    //@ fix atomic_value_allowed<T>(allowed: bool, value: T) -> bool { allowed }
+
+    // Arithmetic is closed over the supported slot types. It may break
+    // a narrower invariant, such as a byte restricted to 0 and 1.
+    unsafe fn atomic_xadd_safety<T, U>(dst: *mut T, delta: U) -> T;
+    //@ req [?f]atomic_points_to(dst, 1, (atomic_value_allowed)(true));
+    //@ ens [f]atomic_points_to(dst, 1, (atomic_value_allowed)(true));
+    //@ on_unwind_ens false;
+
+    unsafe fn atomic_xsub_safety<T, U>(dst: *mut T, delta: U) -> T;
+    //@ req [?f]atomic_points_to(dst, 1, (atomic_value_allowed)(true));
+    //@ ens [f]atomic_points_to(dst, 1, (atomic_value_allowed)(true));
+    //@ on_unwind_ens false;
+
+    //@ fix atomic_bool_byte(value: u8) -> bool { value == 0 || value == 1 }
+
+    unsafe fn atomic_and_safety<T, U>(dst: *mut T, delta: U) -> T;
+    //@ req [?f]atomic_points_to(dst, 1, (atomic_value_allowed)(true));
+    //@ ens [f]atomic_points_to(dst, 1, (atomic_value_allowed)(true));
+    //@ on_unwind_ens false;
+
+    unsafe fn atomic_and_byte_safety(dst: *mut u8, delta: u8) -> u8;
+    //@ req [?f]atomic_points_to(dst, 1, ?valid) &*& (valid == (atomic_value_allowed)(true) || (valid == atomic_bool_byte && atomic_bool_byte(delta) == true));
+    //@ ens [f]atomic_points_to(dst, 1, valid) &*& valid(result) == true;
+    //@ on_unwind_ens false;
+
+    unsafe fn atomic_nand_safety<T, U>(dst: *mut T, delta: U) -> T;
+    //@ req [?f]atomic_points_to(dst, 1, (atomic_value_allowed)(true));
+    //@ ens [f]atomic_points_to(dst, 1, (atomic_value_allowed)(true));
+    //@ on_unwind_ens false;
+
+    unsafe fn atomic_or_safety<T, U>(dst: *mut T, delta: U) -> T;
+    //@ req [?f]atomic_points_to(dst, 1, (atomic_value_allowed)(true));
+    //@ ens [f]atomic_points_to(dst, 1, (atomic_value_allowed)(true));
+    //@ on_unwind_ens false;
+
+    unsafe fn atomic_or_byte_safety(dst: *mut u8, delta: u8) -> u8;
+    //@ req [?f]atomic_points_to(dst, 1, ?valid) &*& (valid == (atomic_value_allowed)(true) || (valid == atomic_bool_byte && atomic_bool_byte(delta) == true));
+    //@ ens [f]atomic_points_to(dst, 1, valid) &*& valid(result) == true;
+    //@ on_unwind_ens false;
+
+    unsafe fn atomic_xor_safety<T, U>(dst: *mut T, delta: U) -> T;
+    //@ req [?f]atomic_points_to(dst, 1, (atomic_value_allowed)(true));
+    //@ ens [f]atomic_points_to(dst, 1, (atomic_value_allowed)(true));
+    //@ on_unwind_ens false;
+
+    unsafe fn atomic_xor_byte_safety(dst: *mut u8, delta: u8) -> u8;
+    //@ req [?f]atomic_points_to(dst, 1, ?valid) &*& (valid == (atomic_value_allowed)(true) || (valid == atomic_bool_byte && atomic_bool_byte(delta) == true));
+    //@ ens [f]atomic_points_to(dst, 1, valid) &*& valid(result) == true;
+    //@ on_unwind_ens false;
+
+    // Min and max select either the resident value or the supplied value.
+    // They preserve any invariant that also accepts the supplied value.
+    unsafe fn atomic_max_safety<T>(dst: *mut T, candidate: T) -> T;
+    //@ req [?f]atomic_points_to(dst, 1, ?valid) &*& valid(candidate) == true;
+    //@ ens [f]atomic_points_to(dst, 1, valid) &*& valid(result) == true;
+    //@ on_unwind_ens false;
+
+    unsafe fn atomic_min_safety<T>(dst: *mut T, candidate: T) -> T;
+    //@ req [?f]atomic_points_to(dst, 1, ?valid) &*& valid(candidate) == true;
+    //@ ens [f]atomic_points_to(dst, 1, valid) &*& valid(result) == true;
+    //@ on_unwind_ens false;
+
+    unsafe fn atomic_umax_safety<T>(dst: *mut T, candidate: T) -> T;
+    //@ req [?f]atomic_points_to(dst, 1, ?valid) &*& valid(candidate) == true;
+    //@ ens [f]atomic_points_to(dst, 1, valid) &*& valid(result) == true;
+    //@ on_unwind_ens false;
+
+    unsafe fn atomic_umin_safety<T>(dst: *mut T, candidate: T) -> T;
+    //@ req [?f]atomic_points_to(dst, 1, ?valid) &*& valid(candidate) == true;
+    //@ ens [f]atomic_points_to(dst, 1, valid) &*& valid(result) == true;
+    //@ on_unwind_ens false;
+
 }
 
 mod mem {

@@ -323,6 +323,7 @@ struct TyKind {
     struct RawPtrTy {
         ty @0: Ty;
         mutability @1: Mutability;
+        isThin @2: Bool; # Concrete pointer has a single scalar layout.
     }
 
     struct RefTy {

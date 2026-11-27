@@ -1949,9 +1949,27 @@ use rustc_span::RemapPathScopeComponents;
                     Self::encode_ty_adt(tcx, enc_ctx, *adt_def, substs, adt_ty_cpn);
                 }
                 ty::TyKind::Foreign(_) => ty_kind_cpn.set_foreign(()),
-                ty::TyKind::RawPtr(ty, mutability) => {
-                    let raw_ptr_ty_cpn = ty_kind_cpn.init_raw_ptr();
-                    Self::encode_ty_raw_ptr(tcx, enc_ctx, *ty, *mutability, raw_ptr_ty_cpn);
+                ty::TyKind::RawPtr(pointee, mutability) => {
+                    use rustc_middle::ty::TypeVisitableExt;
+                    let mut raw_ptr_ty_cpn = ty_kind_cpn.init_raw_ptr();
+                    // A pointer to a generic pointee is thin if rustc can lay it out in the
+                    // enclosing function's typing environment, e.g. *mut T with T: Sized.
+                    let env = if !ty.has_param() {
+                        Some(ty::TypingEnv::fully_monomorphized())
+                    } else if let EncKind::Body(body) = enc_ctx.mode {
+                        Some(ty::TypingEnv::post_analysis(tcx, body.source.def_id()))
+                    } else {
+                        None
+                    };
+                    if let (Some(env), false, false) = (env, ty.has_aliases(), ty.has_escaping_bound_vars()) {
+                        if let Ok(layout) = tcx.layout_of(env.as_query_input(ty)) {
+                            raw_ptr_ty_cpn.set_is_thin(
+                                matches!(layout.backend_repr, rustc_abi::BackendRepr::Scalar(_))
+                                    && layout.size == tcx.data_layout.pointer_size(),
+                            );
+                        }
+                    }
+                    Self::encode_ty_raw_ptr(tcx, enc_ctx, *pointee, *mutability, raw_ptr_ty_cpn);
                 }
                 ty::TyKind::Ref(region, ty, mutability) => {
                     let ref_ty_cpn = ty_kind_cpn.init_ref();

@@ -429,10 +429,10 @@ let fns_to_be_inlined: (string * body) list =
       [
         {id={name="result"}; ty={kind=Param "T"}; mutability=Not; source_info={span}};
         {id={name="self"}; ty={kind=Adt {id={name="std::boxed::Box"}; kind=StructKind; substs=[{kind=Type {kind=Param "T"}}; {kind=Type {kind=Param "A"}}]}}; mutability=Not; source_info={span}};
-        {id={name="contents_ptr"}; ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}}}; mutability=Not; source_info={span}};
+        {id={name="contents_ptr"}; ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}; is_thin=false}}; mutability=Not; source_info={span}};
         {id={name="ref_self"}; ty={kind=Ref {region={id="'<erased>"}; mutability=Mut; ty={kind=Adt {id={name="std::boxed::Box"}; kind=StructKind; substs=[{kind=Type {kind=Param "T"}}; {kind=Type {kind=Param "A"}}]}}}}; mutability=Not; source_info={span}};
         {id={name="drop_result"}; ty={kind=Tuple []}; mutability=Not; source_info={span}};
-        {id={name="contents_ptr2"}; ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}}}; mutability=Not; source_info={span}};
+        {id={name="contents_ptr2"}; ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}; is_thin=false}}; mutability=Not; source_info={span}};
       ]
     in
     let basic_blocks: basic_block list =
@@ -453,7 +453,7 @@ let fns_to_be_inlined: (string * body) list =
                     local_is_mutable=false;
                     kind=Other
                   };
-                  ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}}}
+                  ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}; is_thin=false}}
                 }
               };
               source_info={span}
@@ -483,7 +483,7 @@ let fns_to_be_inlined: (string * body) list =
                     local_is_mutable=false;
                     kind=Other
                   };
-                  ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}}}
+                  ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}; is_thin=false}}
                 }
               };
               source_info={span}
@@ -636,7 +636,7 @@ let fns_to_be_inlined: (string * body) list =
   in
   let local_decls: local_decl list =
     [
-      {id={name="result"}; ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}}}; mutability=Not; source_info={span}};
+      {id={name="result"}; ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}; is_thin=false}}; mutability=Not; source_info={span}};
       {id={name="self"}; ty={kind=Ref {region={id="'<erased>"}; mutability=Not; ty={kind=Adt {id={name="std::boxed::Box"}; kind=StructKind; substs=[{kind=Type {kind=Param "T"}}]}}}}; mutability=Not; source_info={span}};
       {id={name="b"}; ty={kind=Adt {id={name="std::boxed::Box"}; kind=StructKind; substs=[{kind=Type {kind=Param "T"}}]}}; mutability=Not; source_info={span}};
     ]
@@ -671,7 +671,7 @@ let fns_to_be_inlined: (string * body) list =
                   local_is_mutable=false;
                   kind=Other
                 };
-                ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}}}
+                ty={kind=RawPtr {mutability=Not; ty={kind=Param "T"}; is_thin=false}}
               }
             };
             source_info={span}
@@ -688,7 +688,7 @@ let fns_to_be_inlined: (string * body) list =
     def_path="std::boxed::Box::<T, A>::as_ptr";
     module_def_path="std::boxed";
     contract={annotations=[]; span};
-    output={kind=RawPtr {mutability=Not; ty={kind=Param "T"}}};
+    output={kind=RawPtr {mutability=Not; ty={kind=Param "T"}; is_thin=false}};
     inputs=[
       {kind=Ref {region={id="'<erased>"}; mutability=Not; ty={kind=Adt {id={name="std::boxed::Box"}; kind=StructKind; substs=[{kind=Type {kind=Param "T"}}]}}}};
     ];
